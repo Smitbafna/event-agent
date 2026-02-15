@@ -1,0 +1,80 @@
+"""Event store for EventAgent using NATS JetStream."""
+
+from abc import ABC, abstractmethod
+from typing import Any
+
+from nats.aio.client import Client as NATSClient
+from nats.js.api import ConsumerConfig, StreamConfig
+
+from .models import Event, EventType
+
+
+class EventStore(ABC):
+    """Abstract event store interface."""
+    
+    @abstractmethod
+    async def publish(self, event: Event) -> str:
+        """Publish an event to the store."""
+        pass
+    
+    @abstractmethod
+    async def subscribe(self, event_type: EventType, callback):
+        """Subscribe to events of a specific type."""
+        pass
+
+
+class NATSEventStore:
+    """NATS JetStream based event store implementation."""
+    
+    def __init__(self, nc: NATSClient, js: Any):
+        self.nc = nc
+        self.js = js
+        self.stream_name = "EVENTS"
+    
+    async def initialize(self) -> None:
+        """Initialize the stream for events."""
+        await self.js.add_stream(
+            StreamConfig(
+                name=self.stream_name,
+                subjects=["events.>*"],
+            )
+        )
+    
+    async def publish(self, event: Event) -> str:
+        """Publish an event to NATS JetStream."""
+        subject = f"events.{event.event_type.value}"
+        await self.js.publish(subject, event.model_dump_json().encode())
+        return subject
+    
+    async def subscribe(self, event_type: EventType, callback):
+        """Subscribe to events of a specific type."""
+        subject = f"events.{event_type.value}"
+        
+        # Create or update consumer
+        await self.js.add_consumer(
+            self.stream_name,
+            ConsumerConfig(
+                name=f"eventagent-{event_type.value.replace('.', '-')}",
+                filter_subjects=[subject],
+            ),
+        )
+        
+        # Subscribe to the subject
+        async def message_handler(msg):
+            await callback(msg)
+        
+        await self.js.subscribe(subject, cb=message_handler, durable=f"eventagent-{event_type.value}")
+
+
+async def create_event_store(servers: list[str] | None = None) -> NATSEventStore:
+    """Create and connect an event store."""
+    nc = NATSClient()
+    js = nc.jetstream()
+    
+    connection_servers = servers or ["nats://localhost:4222"]
+    await nc.connect(servers=connection_servers)
+    
+    store = NATSEventStore(nc, js)
+    await store.initialize()
+    
+    return store
