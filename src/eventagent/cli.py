@@ -31,16 +31,16 @@ def listen(
         
         # Register handlers for each event type
         async def handle_order_created(event: Event):
-            console.print(f"[green]Order created:[/green] {event.payload}")
+            console.print(f"[green]Order created:[/green] {event.data}")
         
         async def handle_payment_initiated(event: Event):
-            console.print(f"[blue]Payment initiated:[/blue] {event.payload}")
+            console.print(f"[blue]Payment initiated:[/blue] {event.data}")
         
         async def handle_payment_failed(event: Event):
-            console.print(f"[red]Payment failed:[/red] {event.payload}")
+            console.print(f"[red]Payment failed:[/red] {event.data}")
         
         async def handle_payment_retry_scheduled(event: Event):
-            console.print(f"[yellow]Payment retry scheduled:[/yellow] {event.payload}")
+            console.print(f"[yellow]Payment retry scheduled:[/yellow] {event.data}")
         
         consumer.register_handler(EventType.ORDER_CREATED, handle_order_created)
         consumer.register_handler(EventType.PAYMENT_INITIATED, handle_payment_initiated)
@@ -71,6 +71,12 @@ def publish(
         "--source",
         help="Event source identifier",
     ),
+    correlation: str = typer.Option(
+        "{}",
+        "--correlation",
+        "-c",
+        help="JSON correlation data (e.g., {\"order_id\": \"123\"})",
+    ),
     servers: str = typer.Option(
         "nats://localhost:4222",
         "--servers",
@@ -91,14 +97,16 @@ def publish(
             console.print(f"[yellow]Valid types: {[e.value for e in EventType]}[/yellow]")
             raise typer.Exit(1)
         
-        # Parse payload
+        # Parse payload and correlation
         payload_dict = json.loads(payload)
+        correlation_dict = json.loads(correlation) if correlation.strip() else {}
         
         # Create and publish event
         event = Event(
             event_type=et,
-            payload=payload_dict,
+            data=payload_dict,
             source=source,
+            correlation=correlation_dict,
         )
         
         subject = await store.publish(event)
