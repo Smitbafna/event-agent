@@ -1,0 +1,9 @@
+services:
+  nats:
+    image: nats:latest
+    container_name: eventagent-nats
+    network_mode: host
+    command: ["-js"]
+
+volumes:
+  nats-data:

@@ -33,12 +33,18 @@ class NATSEventStore:
     
     async def initialize(self) -> None:
         """Initialize the stream for events."""
-        await self.js.add_stream(
-            StreamConfig(
-                name=self.stream_name,
-                subjects=["events.>"],
+        from nats.js.errors import BadRequestError
+        
+        try:
+            await self.js.add_stream(
+                StreamConfig(
+                    name=self.stream_name,
+                    subjects=["events.>"],
+                )
             )
-        )
+        except BadRequestError:
+            # Stream already exists, ignore
+            pass
     
     async def publish(self, event: Event) -> str:
         """Publish an event to NATS JetStream."""

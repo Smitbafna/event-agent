@@ -8,7 +8,7 @@ from nats.aio.client import Client as NATSClient
 from rich.console import Console
 
 from .consumer import EventConsumer
-from .models import Event, EventType
+from .models import Event, Correlation, EventType
 from .storage import SQLiteEventStore, get_storage
 from .store import create_event_store
 
@@ -16,10 +16,57 @@ app = typer.Typer()
 console = Console()
 
 
+async def _run_agent(servers: str, db_path: str | None):
+    """Core async logic for running the agent."""
+    # Connect to NATS
+    nc = NATSClient()
+    await nc.connect(servers=servers.split(","))
+    js = nc.jetstream()
+    
+    # Initialize SQLite storage
+    storage = get_storage(db_path)
+    
+    # Create consumer with NATS connection and storage
+    consumer = EventConsumer(nc, js, storage)
+    
+    # Register handlers for each known event type
+    async def handle_order_created(event: Event):
+        console.print(f"[green]Order created:[/green] {event.data}")
+    
+    async def handle_order_cancelled(event: Event):
+        console.print(f"[red]Order cancelled:[/red] {event.data}")
+    
+    async def handle_payment_initiated(event: Event):
+        console.print(f"[blue]Payment initiated:[/blue] {event.data}")
+    
+    async def handle_payment_failed(event: Event):
+        console.print(f"[red]Payment failed:[/red] {event.data}")
+    
+    async def handle_payment_retry_scheduled(event: Event):
+        console.print(f"[yellow]Payment retry scheduled:[/yellow] {event.data}")
+    
+    consumer.register_handler(EventType.ORDER_CREATED.value, handle_order_created)
+    consumer.register_handler(EventType.ORDER_CANCELLED.value, handle_order_cancelled)
+    consumer.register_handler(EventType.PAYMENT_INITIATED.value, handle_payment_initiated)
+    consumer.register_handler(EventType.PAYMENT_FAILED.value, handle_payment_failed)
+    consumer.register_handler(EventType.PAYMENT_RETRY_SCHEDULED.value, handle_payment_retry_scheduled)
+    
+    console.print(f"Connected to NATS: {servers}")
+    console.print("Subscribed to: events.>")
+    console.print("EventAgent is running...")
+    
+    # Start consuming events with wildcard subscription
+    await consumer.start()
+    
+    # Keep running
+    while True:
+        await asyncio.sleep(1)
+
+
 @app.command()
-def listen(
+def run(
     servers: str = typer.Option(
-        "nats://localhost:4222",
+        "localhost:4222",
         "--servers",
         "-s",
         help="NATS server URL(s), comma-separated",
@@ -41,54 +88,73 @@ def listen(
         - events.order.cancelled
     """
     
-    async def run():
-        # Connect to NATS
-        nc = NATSClient()
-        await nc.connect(servers=servers.split(","))
-        js = nc.jetstream()
-        
-        # Initialize SQLite storage
-        storage = get_storage(db_path if db_path else None)
-        
-        # Create consumer with NATS connection and storage
-        consumer = EventConsumer(nc, js, storage)
-        
-        # Register handlers for each known event type
-        async def handle_order_created(event: Event):
-            console.print(f"[green]Order created:[/green] {event.data}")
-        
-        async def handle_order_cancelled(event: Event):
-            console.print(f"[red]Order cancelled:[/red] {event.data}")
-        
-        async def handle_payment_initiated(event: Event):
-            console.print(f"[blue]Payment initiated:[/blue] {event.data}")
-        
-        async def handle_payment_failed(event: Event):
-            console.print(f"[red]Payment failed:[/red] {event.data}")
-        
-        async def handle_payment_retry_scheduled(event: Event):
-            console.print(f"[yellow]Payment retry scheduled:[/yellow] {event.data}")
-        
-        consumer.register_handler(EventType.ORDER_CREATED.value, handle_order_created)
-        consumer.register_handler(EventType.ORDER_CANCELLED.value, handle_order_cancelled)
-        consumer.register_handler(EventType.PAYMENT_INITIATED.value, handle_payment_initiated)
-        consumer.register_handler(EventType.PAYMENT_FAILED.value, handle_payment_failed)
-        consumer.register_handler(EventType.PAYMENT_RETRY_SCHEDULED.value, handle_payment_retry_scheduled)
-        
-        console.print("[bold]EventAgent started. Listening for events on events.>[/bold]")
-        console.print(f"[dim]Database: {storage.db_path}[/dim]")
-        
-        # Start consuming events with wildcard subscription
-        await consumer.start()
-        
-        # Keep running
-        while True:
-            await asyncio.sleep(1)
-    
     try:
-        asyncio.run(run())
+        asyncio.run(_run_agent(servers, db_path if db_path else None))
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down EventAgent...[/yellow]")
+
+
+# Keep listen as an alias for run
+@app.command()
+def listen(
+    servers: str = typer.Option(
+        "localhost:4222",
+        "--servers",
+        "-s",
+        help="NATS server URL(s), comma-separated",
+    ),
+    db_path: str = typer.Option(
+        "",
+        "--db-path",
+        "-d",
+        help="SQLite database path (default: ~/.eventagent/events.db)",
+    )
+) -> None:
+    """Start EventAgent and listen for events (alias for 'run').
+    
+    Subscribes to: events.>
+    
+    This captures:
+        - events.order.created
+        - events.payment.failed
+        - events.order.cancelled
+    """
+    
+    try:
+        asyncio.run(_run_agent(servers, db_path if db_path else None))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Shutting down EventAgent...[/yellow]")
+
+
+@app.command("publish-test")
+def publish_test(
+    servers: str = typer.Option(
+        "localhost:4222",
+        "--servers",
+        "-s",
+        help="NATS server URL(s), comma-separated",
+    )
+) -> None:
+    """Publish a test order.created event to NATS."""
+    
+    async def run_async():
+        store = await create_event_store(servers.split(","))
+        
+        # Create and publish a test event
+        event = Event(
+            event_type=EventType.ORDER_CREATED.value,
+            source="order-service",
+            correlation=Correlation(order_id="8472"),
+            data={"amount": 1000},
+        )
+        
+        subject = await store.publish(event)
+        console.print(f"Published test event to {subject}")
+        
+        # Close connection
+        await store.nc.close()
+    
+    asyncio.run(run_async())
 
 
 @app.command()
@@ -112,7 +178,7 @@ def publish(
         help="JSON correlation data (e.g., {\"order_id\": \"123\"})",
     ),
     servers: str = typer.Option(
-        "nats://localhost:4222",
+        "localhost:4222",
         "--servers",
         "-s",
         help="NATS server URL(s), comma-separated",
@@ -120,7 +186,7 @@ def publish(
 ) -> None:
     """Publish an event to NATS."""
     
-    async def run():
+    async def run_async():
         store = await create_event_store(servers.split(","))
         
         # Parse the event type
@@ -137,7 +203,7 @@ def publish(
         
         # Create and publish event
         event = Event(
-            event_type=et,
+            event_type=et.value,  # Pass the string value
             data=payload_dict,
             source=source,
             correlation=correlation_dict,
@@ -145,14 +211,17 @@ def publish(
         
         subject = await store.publish(event)
         console.print(f"[green]Published event to {subject}[/green]")
+        
+        # Close connection
+        await store.nc.close()
     
-    asyncio.run(run())
+    asyncio.run(run_async())
 
 
 @app.command()
 def status(
     servers: str = typer.Option(
-        "nats://localhost:4222",
+        "localhost:4222",
         "--servers",
         "-s",
         help="NATS server URL(s), comma-separated",
@@ -160,12 +229,12 @@ def status(
 ) -> None:
     """Check EventAgent connection status."""
     
-    async def run():
+    async def run_async():
         store = await create_event_store(servers.split(","))
         console.print("[green]Connected to NATS server[/green]")
         console.print(f"Stream: {store.stream_name}")
     
-    asyncio.run(run())
+    asyncio.run(run_async())
 
 
 @app.command()

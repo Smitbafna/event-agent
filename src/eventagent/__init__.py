@@ -3,13 +3,25 @@
 __version__ = "0.1.0"
 
 from .consumer import EventConsumer
-from .models import Correlation, Event, EventType
+from .models import (
+    Correlation,
+    Event,
+    EventType,
+    OrderCreatedEvent,
+    PaymentFailedEvent,
+    PaymentInitiatedEvent,
+    PaymentRetryScheduledEvent,
+)
 from .storage import SQLiteEventStore, get_storage
 
 __all__ = [
     "Event",
-    "EventType", 
+    "EventType",
     "Correlation",
+    "OrderCreatedEvent",
+    "PaymentInitiatedEvent",
+    "PaymentFailedEvent",
+    "PaymentRetryScheduledEvent",
     "EventConsumer",
     "SQLiteEventStore",
     "get_storage",

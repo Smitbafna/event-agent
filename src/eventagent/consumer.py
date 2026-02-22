@@ -49,9 +49,10 @@ class EventConsumer:
             # Store in SQLite
             if self.storage:
                 self.storage.store_event(event)
+                print(f"[dim]Stored event: {event.event_id}[/dim]")
             
             # Call registered handlers for this event type
-            handlers = self.handlers.get(event.event_type.value, [])
+            handlers = self.handlers.get(event.event_type, [])
             
             for handler in handlers:
                 try:

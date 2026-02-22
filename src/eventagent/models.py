@@ -1,11 +1,12 @@
 """Event models for EventAgent."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from pydantic.json import pydantic_encoder
 
 
 class EventType(str, Enum):
@@ -25,15 +26,29 @@ class Correlation(BaseModel):
     correlation key (e.g., order_id) can be linked together:
     
         order_id = 8472
-                ↓
+                  ↓
         order.created
         payment.initiated
         payment.failed
     """
     
+    model_config = {"extra": "allow"}
+    
     order_id: str | None = None
     customer_id: str | None = None
     payment_id: str | None = None
+    
+    def __getitem__(self, key: str) -> Any:
+        """Allow dict-like access for compatibility."""
+        return getattr(self, key)
+    
+    def __contains__(self, key: str) -> bool:
+        """Allow 'in' operator for compatibility."""
+        try:
+            getattr(self, key)
+            return True
+        except AttributeError:
+            return False
     
     def model_dump(self) -> dict[str, Any]:
         """Return only non-None values."""
@@ -60,11 +75,60 @@ class Event(BaseModel):
     """
     
     event_id: str = Field(default_factory=lambda: f"evt_{uuid4().hex[:8]}")
-    event_type: str  # Accept any event type string (e.g., "order.created", "payment.failed")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    event_type: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     source: str
-    correlation: Correlation | dict[str, Any] = Field(default_factory=dict)
-    data: dict[str, Any] = Field(default_factory=dict)
+    correlation: Correlation | dict[str, Any] = Field(default_factory=lambda: {})
+    data: dict[str, Any] = Field(default_factory=lambda: {})
+    
+    @model_validator(mode='before')
+    @classmethod
+    def _validate_correlation(cls, data: Any) -> Any:
+        """Convert correlation dict to Correlation model if needed."""
+        if isinstance(data, dict) and 'correlation' in data:
+            if isinstance(data['correlation'], dict):
+                data['correlation'] = Correlation(**data['correlation'])
+        return data
+    
+    def to_json_dict(self) -> dict[str, Any]:
+        """Convert event to a JSON-serializable dictionary."""
+        result = {
+            "event_id": self.event_id,
+            "event_type": self.event_type,
+            "timestamp": self.timestamp.isoformat(),
+            "source": self.source,
+            "data": self.data,
+        }
+        # Handle correlation serialization
+        if self.correlation:
+            if isinstance(self.correlation, Correlation):
+                result['correlation'] = self.correlation.model_dump()
+            else:
+                result['correlation'] = self.correlation
+        return result
+    
+    @classmethod
+    def create(
+        cls,
+        event_type: str,
+        source: str,
+        data: dict[str, Any] | None = None,
+        correlation: Correlation | dict[str, Any] | None = None,
+    ) -> "Event":
+        """Factory method to create an event with standard envelope.
+        
+        Args:
+            event_type: The type of event (e.g., "order.created")
+            source: The source service publishing the event
+            data: Optional event payload data
+            correlation: Optional correlation data to link related events
+        """
+        return cls(
+            event_type=event_type,
+            source=source,
+            data=data or {},
+            correlation=correlation or {},
+        )
 
 
 class OrderCreatedEvent(BaseModel):

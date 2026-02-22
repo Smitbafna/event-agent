@@ -44,6 +44,20 @@ class SQLiteEventStore:
     
     def store_event(self, event: Event) -> None:
         """Store an event in SQLite."""
+        # Print event receipt info
+        print(f"Received event: {event.event_type}")
+        
+        # Print correlation info if available
+        if event.correlation:
+            corr_data = event.correlation.model_dump() if hasattr(event.correlation, 'model_dump') else event.correlation
+            if corr_data:
+                # Format as key=value pairs
+                corr_pairs = ", ".join(f"{k}={v}" for k, v in corr_data.items())
+                print(f"Correlation: {corr_pairs}")
+        
+        # Print stored event
+        print(f"Stored event: {event.event_id}")
+        
         self.conn.execute(
             """
             INSERT OR IGNORE INTO events (event_id, event_type, timestamp, source, correlation, data)
@@ -51,7 +65,7 @@ class SQLiteEventStore:
             """,
             (
                 event.event_id,
-                event.event_type.value,
+                event.event_type,  # event_type is already a string
                 event.timestamp.isoformat(),
                 event.source,
                 str(event.correlation.model_dump() if hasattr(event.correlation, 'model_dump') else event.correlation),
