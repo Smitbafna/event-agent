@@ -23,7 +23,7 @@ async def publish_order_created(
     """
     # Create the event
     event = Event(
-        event_type=EventType.ORDER_CREATED,
+        event_type=EventType.ORDER_CREATED.value,
         source="order-service",
         correlation=Correlation(order_id=order_id),
         data={"amount": amount},

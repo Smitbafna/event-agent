@@ -12,6 +12,7 @@ class EventType(str, Enum):
     """Event types for the distributed system."""
     
     ORDER_CREATED = "order.created"
+    ORDER_CANCELLED = "order.cancelled"
     PAYMENT_INITIATED = "payment.initiated"
     PAYMENT_FAILED = "payment.failed"
     PAYMENT_RETRY_SCHEDULED = "payment.retry_scheduled"
@@ -59,7 +60,7 @@ class Event(BaseModel):
     """
     
     event_id: str = Field(default_factory=lambda: f"evt_{uuid4().hex[:8]}")
-    event_type: EventType
+    event_type: str  # Accept any event type string (e.g., "order.created", "payment.failed")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     source: str
     correlation: Correlation | dict[str, Any] = Field(default_factory=dict)
