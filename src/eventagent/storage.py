@@ -1,5 +1,6 @@
 """SQLite storage for EventAgent."""
 
+import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -29,8 +30,9 @@ class SQLiteEventStore:
                 event_type TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 source TEXT NOT NULL,
-                correlation TEXT,
-                data TEXT,
+                correlation_key TEXT,
+                correlation_value TEXT,
+                payload TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -40,43 +42,51 @@ class SQLiteEventStore:
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_timestamp ON events(timestamp)
         """)
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_correlation_key ON events(correlation_key)
+        """)
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_correlation_value ON events(correlation_value)
+        """)
         self.conn.commit()
     
     def store_event(self, event: Event) -> None:
-        """Store an event in SQLite."""
-        # Print event receipt info
-        print(f"Received event: {event.event_type}")
+        """Store an event in SQLite.
         
-        # Print correlation info if available
-        if event.correlation:
-            corr_data = event.correlation.model_dump() if hasattr(event.correlation, 'model_dump') else event.correlation
-            if corr_data:
-                # Format as key=value pairs
-                corr_pairs = ", ".join(f"{k}={v}" for k, v in corr_data.items())
-                print(f"Correlation: {corr_pairs}")
+        This is the 'Persist Event' step in the EventAgent consumer flow.
+        """
+        correlation_data = event.correlation.model_dump() if hasattr(event.correlation, 'model_dump') else event.correlation
         
-        # Print stored event
-        print(f"Stored event: {event.event_id}")
+        # Extract first correlation key/value pair for indexing
+        correlation_key = None
+        correlation_value = None
+        if correlation_data:
+            if isinstance(correlation_data, dict):
+                first_key = next(iter(correlation_data.keys()), None)
+                if first_key:
+                    correlation_key = first_key
+                    correlation_value = str(correlation_data[first_key])
         
         self.conn.execute(
             """
-            INSERT OR IGNORE INTO events (event_id, event_type, timestamp, source, correlation, data)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO events (event_id, event_type, timestamp, source, correlation_key, correlation_value, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.event_id,
-                event.event_type,  # event_type is already a string
+                event.event_type,
                 event.timestamp.isoformat(),
                 event.source,
-                str(event.correlation.model_dump() if hasattr(event.correlation, 'model_dump') else event.correlation),
-                str(event.data),
+                correlation_key,
+                correlation_value,
+                json.dumps(event.data),
             )
         )
         self.conn.commit()
     
     def get_events(self, event_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """Retrieve events from SQLite, optionally filtered by type."""
-        query = "SELECT event_id, event_type, timestamp, source, correlation, data FROM events"
+        query = "SELECT event_id, event_type, timestamp, source, correlation_key, correlation_value, payload FROM events"
         params: tuple = ()
         
         if event_type:
@@ -94,8 +104,30 @@ class SQLiteEventStore:
                 "event_type": row[1],
                 "timestamp": row[2],
                 "source": row[3],
-                "correlation": row[4],
-                "data": row[5],
+                "correlation_key": row[4],
+                "correlation_value": row[5],
+                "payload": row[6],
+            }
+            for row in rows
+        ]
+    
+    def get_events_by_correlation(self, correlation_key: str, correlation_value: str) -> list[dict[str, Any]]:
+        """Retrieve events filtered by correlation key and value."""
+        cursor = self.conn.execute(
+            "SELECT event_id, event_type, timestamp, source, correlation_key, correlation_value, payload FROM events WHERE correlation_key = ? AND correlation_value = ? ORDER BY timestamp ASC",
+            (correlation_key, correlation_value)
+        )
+        rows = cursor.fetchall()
+        
+        return [
+            {
+                "event_id": row[0],
+                "event_type": row[1],
+                "timestamp": row[2],
+                "source": row[3],
+                "correlation_key": row[4],
+                "correlation_value": row[5],
+                "payload": row[6],
             }
             for row in rows
         ]

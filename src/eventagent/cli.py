@@ -58,9 +58,16 @@ async def _run_agent(servers: str, db_path: str | None):
     # Start consuming events with wildcard subscription
     await consumer.start()
     
-    # Keep running
-    while True:
-        await asyncio.sleep(1)
+    try:
+        # Keep running
+        while consumer._running:
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await consumer.stop()
+        await nc.close()
+        storage.close()
 
 
 @app.command()
@@ -237,6 +244,77 @@ def status(
     asyncio.run(run_async())
 
 
+@app.command("events")
+def events(
+    order_id: str = typer.Option(
+        "",
+        "--order-id",
+        help="Filter by order_id correlation",
+    ),
+    customer_id: str = typer.Option(
+        "",
+        "--customer-id",
+        help="Filter by customer_id correlation",
+    ),
+    payment_id: str = typer.Option(
+        "",
+        "--payment-id",
+        help="Filter by payment_id correlation",
+    ),
+    event_type: str = typer.Option(
+        "",
+        "--type",
+        "-t",
+        help="Filter by event type (optional)",
+    ),
+    limit: int = typer.Option(
+        100,
+        "--limit",
+        "-l",
+        help="Maximum number of events to retrieve",
+    ),
+    db_path: str = typer.Option(
+        "",
+        "--db-path",
+        "-d",
+        help="SQLite database path (default: ~/.eventagent/events.db)",
+    )
+) -> None:
+    """Query events from SQLite storage.
+    
+    Can filter by correlation keys like --order-id or --customer-id.
+    
+    Example:
+        eventagent events --order-id 8472
+    
+    Output format:
+        10:00:00  order.created
+    """
+    storage = get_storage(db_path if db_path else None)
+    
+    # Determine correlation filter
+    events_result = []
+    if order_id:
+        events_result = storage.get_events_by_correlation("order_id", order_id)
+    elif customer_id:
+        events_result = storage.get_events_by_correlation("customer_id", customer_id)
+    elif payment_id:
+        events_result = storage.get_events_by_correlation("payment_id", payment_id)
+    else:
+        events_result = storage.get_events(event_type=event_type if event_type else None, limit=limit)
+    
+    for event in events_result:
+        # Parse timestamp and extract time
+        timestamp = event["timestamp"]
+        try:
+            # ISO format: 2026-07-19T10:00:00+00:00 or 2026-07-19T10:00:00Z
+            time_part = timestamp.split("T")[1][:8]  # Get HH:MM:SS
+        except (IndexError, AttributeError):
+            time_part = timestamp
+        
+        console.print(f"{time_part}  {event['event_type']}")
+
+
 @app.command()
 def list_events(
     event_type: str = typer.Option(
@@ -258,17 +336,18 @@ def list_events(
         help="SQLite database path (default: ~/.eventagent/events.db)",
     )
 ) -> None:
-    """List events from SQLite storage."""
+    """List events from SQLite storage (detailed view)."""
     
     storage = get_storage(db_path if db_path else None)
-    events = storage.get_events(event_type=event_type if event_type else None, limit=limit)
+    events_result = storage.get_events(event_type=event_type if event_type else None, limit=limit)
     
-    for event in events:
+    for event in events_result:
         console.print(f"[cyan]{event['event_type']}[/cyan] - {event['event_id']}")
         console.print(f"  Source: {event['source']}")
         console.print(f"  Timestamp: {event['timestamp']}")
-        console.print(f"  Correlation: {event['correlation']}")
-        console.print(f"  Data: {event['data']}")
+        console.print(f"  Correlation Key: {event.get('correlation_key')}")
+        console.print(f"  Correlation Value: {event.get('correlation_value')}")
+        console.print(f"  Payload: {event.get('payload')}")
         console.print()
 
 
