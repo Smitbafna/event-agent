@@ -1,4 +1,21 @@
-"""Order Service for creating and publishing order events."""
+"""Order Service for creating and publishing order events.
+
+NOTE: This is a SEPARATE SERVICE that operates independently.
+It publishes order events to NATS. EventAgent PASSIVELY OBSERVES
+these events but does NOT trigger or call this service.
+
+Architecture:
+    Order Service ──┐
+                    │
+    Payment Service ─┼──► NATS ──► EventAgent (Passive Observer)
+                    │
+                    └──► publishes order events
+    
+Order Service responsibilities:
+    - Publishes order events (order.created, order.cancelled) to NATS
+    - Operates independently - called directly, not triggered by EventAgent
+    - EventAgent only observes what this service publishes
+"""
 
 import asyncio
 
@@ -65,9 +82,30 @@ async def process_order(
     return await create_order(order_id, amount, currency, nats_servers)
 
 
+async def start_order_service(
+    nats_servers: list[str] | None = None,
+    order_id: str = "order_8472",
+    amount: float = 1000.0,
+    currency: str = "USD",
+) -> None:
+    """Start the order service and publish an order event.
+    
+    This is the entry point for running the order service as an independent process.
+    
+    Architecture:
+        Order Service ──┐
+                        │
+        Payment Service ─┼──► NATS
+                        │
+                        └──► publishes order events
+    """
+    subject = await create_order(order_id, amount, currency, nats_servers)
+    print(f"[green]Order Service completed: published to {subject}[/green]")
+
+
 def main() -> None:
     """Main entry point for the order service."""
-    asyncio.run(create_order(order_id="order_8472", amount=1000.0, currency="INR"))
+    asyncio.run(start_order_service())
 
 
 if __name__ == "__main__":

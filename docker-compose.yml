@@ -5,5 +5,51 @@ services:
     network_mode: host
     command: ["-js"]
 
+  # EventAgent - Passive Observer (runs as foreground process)
+  # Subscribes to events.> and persists to SQLite
+  eventagent:
+    image: python:3.11-slim
+    container_name: eventagent-agent
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "-m", "eventagent", "run", "--servers", "localhost:4222"]
+    depends_on:
+      - nats
+    network_mode: host
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  # Order Service - Publishes order.created events to NATS
+  # INDEPENDENT service - does NOT call EventAgent
+  order-service:
+    image: python:3.11-slim
+    container_name: eventagent-order-service
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "-m", "eventagent.services.order_service"]
+    depends_on:
+      - nats
+    network_mode: host
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  # Payment Service - Subscribes to order.created, publishes payment.initiated
+  # INDEPENDENT service - communicates ONLY through NATS events
+  payment-service:
+    image: python:3.11-slim
+    container_name: eventagent-payment-service
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: ["python", "-m", "eventagent.services.payment_service"]
+    depends_on:
+      - nats
+    network_mode: host
+    environment:
+      - PYTHONUNBUFFERED=1
+
 volumes:
   nats-data:
+```

@@ -1,4 +1,24 @@
-"""CLI interface for EventAgent."""
+"""CLI interface for EventAgent - Passive Observer.
+
+Architecture:
+    Order Service ──┐
+                    │
+    Payment Service ─┼──► NATS
+                    │
+                    └──► EventAgent (Passive Observer)
+
+EventAgent Flow:
+    NATS
+      ↓
+    Subscribe to events.>
+      ↓
+    Validate
+      ↓
+    Persist to SQLite
+
+EventAgent is a PASSIVE OBSERVER. It subscribes to events published by services
+and persists them. It does NOT trigger workflows or publish new events.
+"""
 
 import asyncio
 import json
@@ -17,7 +37,17 @@ console = Console()
 
 
 async def _run_agent(servers: str, db_path: str | None):
-    """Core async logic for running the agent."""
+    """Core async logic for running the agent (passive observer mode).
+    
+    EventAgent observes events published by services:
+        - Order Service publishes: events.order.created, events.order.cancelled
+        - Payment Service publishes: events.payment.initiated, events.payment.succeeded, etc.
+    
+    EventAgent:
+        - Validates each event
+        - Persists to SQLite
+        - Does NOT trigger workflows
+    """
     # Connect to NATS
     nc = NATSClient()
     await nc.connect(servers=servers.split(","))
@@ -29,31 +59,33 @@ async def _run_agent(servers: str, db_path: str | None):
     # Create consumer with NATS connection and storage
     consumer = EventConsumer(nc, js, storage)
     
-    # Register handlers for each known event type
-    async def handle_order_created(event: Event):
-        console.print(f"[green]Order created:[/green] {event.data}")
+    # Register PASSIVE handlers - only for logging/observation, NOT workflow triggering
+    # These handlers only print to console - they do NOT publish events
     
-    async def handle_order_cancelled(event: Event):
-        console.print(f"[red]Order cancelled:[/red] {event.data}")
+    async def log_order_event(event: Event):
+        """Passive observer: log order event."""
+        if event.event_type == EventType.ORDER_CREATED.value:
+            console.print(f"[green]order.created:[/green] {event.data}")
+        else:
+            console.print(f"[red]order.cancelled:[/red] {event.data}")
     
-    async def handle_payment_initiated(event: Event):
-        console.print(f"[blue]Payment initiated:[/blue] {event.data}")
+    async def log_payment_event(event: Event):
+        """Passive observer: log payment events."""
+        console.print(f"[blue]{event.event_type}:[/] {event.data}")
     
-    async def handle_payment_failed(event: Event):
-        console.print(f"[red]Payment failed:[/red] {event.data}")
-    
-    async def handle_payment_retry_scheduled(event: Event):
-        console.print(f"[yellow]Payment retry scheduled:[/yellow] {event.data}")
-    
-    consumer.register_handler(EventType.ORDER_CREATED.value, handle_order_created)
-    consumer.register_handler(EventType.ORDER_CANCELLED.value, handle_order_cancelled)
-    consumer.register_handler(EventType.PAYMENT_INITIATED.value, handle_payment_initiated)
-    consumer.register_handler(EventType.PAYMENT_FAILED.value, handle_payment_failed)
-    consumer.register_handler(EventType.PAYMENT_RETRY_SCHEDULED.value, handle_payment_retry_scheduled)
+    # Register handlers for observation only (logging)
+    consumer.register_handler(EventType.ORDER_CREATED.value, log_order_event)
+    consumer.register_handler(EventType.ORDER_CANCELLED.value, log_order_event)
+    consumer.register_handler(EventType.PAYMENT_INITIATED.value, log_payment_event)
+    consumer.register_handler(EventType.PAYMENT_SUCCEEDED.value, log_payment_event)
+    consumer.register_handler(EventType.PAYMENT_FAILED.value, log_payment_event)
+    consumer.register_handler(EventType.PAYMENT_RETRY_SCHEDULED.value, log_payment_event)
     
     console.print(f"Connected to NATS: {servers}")
     console.print("Subscribed to: events.>")
-    console.print("EventAgent is running...")
+    console.print("[bold yellow]EventAgent is running as PASSIVE OBSERVER[/bold yellow]")
+    console.print("Events will be validated and persisted to SQLite")
+    console.print("No workflows will be triggered")
     
     # Start consuming events with wildcard subscription
     await consumer.start()
@@ -349,6 +381,135 @@ def list_events(
         console.print(f"  Correlation Value: {event.get('correlation_value')}")
         console.print(f"  Payload: {event.get('payload')}")
         console.print()
+
+
+@app.command()
+def demo(
+    payment_result: str = typer.Option(
+        "success",
+        "--payment-result",
+        "-p",
+        help="Payment result to simulate: 'success' or 'failure'",
+    ),
+    scenario: str = typer.Option(
+        "",
+        "--scenario",
+        help="Demo scenario to run: 'payment-stuck' for broken workflow demo",
+    ),
+    servers: str = typer.Option(
+        "localhost:4222",
+        "--servers",
+        "-s",
+        help="NATS server URL(s), comma-separated",
+    ),
+    db_path: str = typer.Option(
+        "",
+        "--db-path",
+        "-d",
+        help="SQLite database path (default: ~/.eventagent/events.db)",
+    )
+) -> None:
+    """Run the EventAgent demo.
+    
+    Flow:
+        1. Payment Service subscriber starts (listens for order.created)
+        2. EventAgent consumer starts (listens for events.>)
+        3. Order Service publishes order.created
+        4. Payment Service receives order.created and publishes payment.initiated
+        5. Payment Service publishes payment.succeeded or payment.failed
+        6. EventAgent stores all events
+    
+    Expected output:
+        [OrderService] Published order.created
+        [PaymentService] Received order.created
+        [PaymentService] Published payment.initiated
+        [PaymentService] Published payment.succeeded
+        [EventAgent] Stored order.created
+        [EventAgent] Stored payment.initiated
+        [EventAgent] Stored payment.succeeded
+    
+    Scenarios:
+        --scenario payment-stuck  Shows a broken workflow where payment fails and retry never occurs
+    """
+    async def run_async():
+        from eventagent.services import run_demo_flow_independent, run_payment_stuck_demo
+        
+        if scenario == "payment-stuck":
+            await run_payment_stuck_demo(
+                nats_servers=servers.split(","),
+                db_path=db_path if db_path else None
+            )
+        else:
+            await run_demo_flow_independent(
+                nats_servers=servers.split(","),
+                payment_result=payment_result,
+                db_path=db_path if db_path else None
+            )
+    
+    try:
+        asyncio.run(run_async())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Demo interrupted[/yellow]")
+
+
+@app.command("demo-independent")
+def demo_independent(
+    payment_result: str = typer.Option(
+        "success",
+        "--payment-result",
+        "-p",
+        help="Payment result to simulate: 'success' or 'failure'",
+    ),
+    servers: str = typer.Option(
+        "localhost:4222",
+        "--servers",
+        "-s",
+        help="NATS server URL(s), comma-separated",
+    ),
+    db_path: str = typer.Option(
+        "",
+        "--db-path",
+        "-d",
+        help="SQLite database path (default: ~/.eventagent/events.db)",
+    )
+) -> None:
+    """Run a demo showing INDEPENDENT event flow through NATS.
+    
+    This demonstrates that services communicate through events, NOT direct function calls:
+    
+        Order Service ──┐
+                        │
+        Payment Service ─┼──► NATS ──► EventAgent (Passive Observer)
+                        │
+                        └──► publishes order events
+        
+        Then:
+                        │
+                        │
+        Payment Service ─┼──► NATS ──► EventAgent (Passive Observer)
+                        │
+                        └──► publishes payment events
+    
+    Each service has its OWN NATS connection and operates independently.
+    EventAgent passively observes all events without triggering anything.
+    
+    Example:
+        eventagent demo-independent --payment-result success
+        eventagent demo-independent --payment-result failure
+    """
+    async def run_async():
+        from eventagent.services import run_demo_flow
+        
+        await run_demo_flow(
+            nats_servers=servers.split(","),
+            payment_result=payment_result,
+            db_path=db_path if db_path else None
+        )
+    
+    try:
+        asyncio.run(run_async())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Demo interrupted[/yellow]")
 
 
 if __name__ == "__main__":
