@@ -15,6 +15,7 @@ class EventType(str, Enum):
     ORDER_CREATED = "order.created"
     ORDER_CANCELLED = "order.cancelled"
     PAYMENT_INITIATED = "payment.initiated"
+    PAYMENT_SUCCEEDED = "payment.succeeded"
     PAYMENT_FAILED = "payment.failed"
     PAYMENT_RETRY_SCHEDULED = "payment.retry_scheduled"
 
@@ -26,10 +27,10 @@ class Correlation(BaseModel):
     correlation key (e.g., order_id) can be linked together:
     
         order_id = 8472
-                  ↓
+              ↓
         order.created
         payment.initiated
-        payment.failed
+        payment.succeeded
     """
     
     model_config = {"extra": "allow"}
@@ -146,6 +147,15 @@ class PaymentInitiatedEvent(BaseModel):
     order_id: str
     payment_id: str
     amount: float
+
+
+class PaymentSucceededEvent(BaseModel):
+    """Payment succeeded event payload."""
+    
+    order_id: str
+    payment_id: str
+    amount: float
+    transaction_id: str | None = None
 
 
 class PaymentFailedEvent(BaseModel):

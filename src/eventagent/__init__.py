@@ -11,6 +11,7 @@ from .models import (
     PaymentFailedEvent,
     PaymentInitiatedEvent,
     PaymentRetryScheduledEvent,
+    PaymentSucceededEvent,
 )
 from .storage import SQLiteEventStore, get_storage
 
@@ -20,6 +21,7 @@ __all__ = [
     "Correlation",
     "OrderCreatedEvent",
     "PaymentInitiatedEvent",
+    "PaymentSucceededEvent",
     "PaymentFailedEvent",
     "PaymentRetryScheduledEvent",
     "EventConsumer",

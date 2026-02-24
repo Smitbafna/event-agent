@@ -131,8 +131,42 @@ def test_event_type_enum():
     assert EventType.ORDER_CREATED.value == "order.created"
     assert EventType.ORDER_CANCELLED.value == "order.cancelled"
     assert EventType.PAYMENT_INITIATED.value == "payment.initiated"
+    assert EventType.PAYMENT_SUCCEEDED.value == "payment.succeeded"
     assert EventType.PAYMENT_FAILED.value == "payment.failed"
     assert EventType.PAYMENT_RETRY_SCHEDULED.value == "payment.retry_scheduled"
+
+
+def test_payment_succeeded_event():
+    """Test PaymentSucceededEvent model."""
+    from eventagent.models import PaymentSucceededEvent
+    
+    event = PaymentSucceededEvent(
+        order_id="8472",
+        payment_id="pay_123",
+        amount=1000.0,
+        transaction_id="txn_456",
+    )
+    
+    assert event.order_id == "8472"
+    assert event.payment_id == "pay_123"
+    assert event.amount == 1000.0
+    assert event.transaction_id == "txn_456"
+
+
+def test_payment_succeeded_event_without_transaction():
+    """Test PaymentSucceededEvent without optional transaction_id."""
+    from eventagent.models import PaymentSucceededEvent
+    
+    event = PaymentSucceededEvent(
+        order_id="8472",
+        payment_id="pay_123",
+        amount=500.0,
+    )
+    
+    assert event.order_id == "8472"
+    assert event.payment_id == "pay_123"
+    assert event.amount == 500.0
+    assert event.transaction_id is None
 
 
 def test_standard_event_envelope():

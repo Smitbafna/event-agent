@@ -3,8 +3,7 @@
 import asyncio
 import json
 import tempfile
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from eventagent.consumer import EventConsumer
 from eventagent.models import Correlation, Event, EventType
@@ -281,5 +280,134 @@ def test_store_event_extracts_correlation():
     # The first key in correlation should be extracted
     assert events[0]["correlation_key"] in ["order_id", "customer_id"]
     assert events[0]["correlation_value"] is not None
+    
+    storage.close()
+
+
+def test_process_payment_initiated_event():
+    """Test successful processing of payment.initiated event."""
+    nc = MagicMock()
+    js = MagicMock()
+    storage = SQLiteEventStore(tempfile.mktemp(suffix=".db"))
+    
+    consumer = EventConsumer(nc, js, storage)
+    
+    msg = AsyncMock()
+    msg.data = json.dumps({
+        "event_id": "evt_pay_init",
+        "event_type": "payment.initiated",
+        "timestamp": "2026-07-19T10:00:00Z",
+        "source": "payment-service",
+        "correlation": {"order_id": "8472", "payment_id": "pay_abc123"},
+        "data": {"amount": 1000},
+    }).encode()
+    msg.ack = AsyncMock()
+    
+    asyncio.run(consumer.process_event(msg))
+    
+    msg.ack.assert_called_once()
+    
+    events = storage.get_events(event_type="payment.initiated")
+    assert len(events) == 1
+    assert events[0]["event_id"] == "evt_pay_init"
+    
+    storage.close()
+
+
+def test_process_payment_succeeded_event():
+    """Test successful processing of payment.succeeded event."""
+    nc = MagicMock()
+    js = MagicMock()
+    storage = SQLiteEventStore(tempfile.mktemp(suffix=".db"))
+    
+    consumer = EventConsumer(nc, js, storage)
+    
+    msg = AsyncMock()
+    msg.data = json.dumps({
+        "event_id": "evt_pay_succ",
+        "event_type": "payment.succeeded",
+        "timestamp": "2026-07-19T10:00:00Z",
+        "source": "payment-service",
+        "correlation": {"order_id": "8472", "payment_id": "pay_abc123"},
+        "data": {"amount": 1000, "transaction_id": "txn_xyz"},
+    }).encode()
+    msg.ack = AsyncMock()
+    
+    asyncio.run(consumer.process_event(msg))
+    
+    msg.ack.assert_called_once()
+    
+    events = storage.get_events(event_type="payment.succeeded")
+    assert len(events) == 1
+    assert events[0]["event_id"] == "evt_pay_succ"
+    
+    storage.close()
+
+
+def test_milestone_1b_payment_flow():
+    """Test the Milestone 1B event flow: order.created -> payment.initiated -> payment.succeeded.
+    
+    This test verifies that all three events can be processed and stored in sequence,
+    maintaining proper correlation linking.
+    """
+    nc = MagicMock()
+    js = MagicMock()
+    storage = SQLiteEventStore(tempfile.mktemp(suffix=".db"))
+    
+    consumer = EventConsumer(nc, js, storage)
+    
+    # Step 1: Process order.created
+    msg1 = AsyncMock()
+    msg1.data = json.dumps({
+        "event_id": "evt_order_1",
+        "event_type": "order.created",
+        "timestamp": "2026-07-19T10:00:00Z",
+        "source": "order-service",
+        "correlation": {"order_id": "8472"},
+        "data": {"amount": 1000},
+    }).encode()
+    msg1.ack = AsyncMock()
+    
+    asyncio.run(consumer.process_event(msg1))
+    msg1.ack.assert_called_once()
+    
+    # Step 2: Process payment.initiated
+    msg2 = AsyncMock()
+    msg2.data = json.dumps({
+        "event_id": "evt_pay_init_1",
+        "event_type": "payment.initiated",
+        "timestamp": "2026-07-19T10:01:00Z",
+        "source": "payment-service",
+        "correlation": {"order_id": "8472", "payment_id": "pay_abc"},
+        "data": {"amount": 1000},
+    }).encode()
+    msg2.ack = AsyncMock()
+    
+    asyncio.run(consumer.process_event(msg2))
+    msg2.ack.assert_called_once()
+    
+    # Step 3: Process payment.succeeded
+    msg3 = AsyncMock()
+    msg3.data = json.dumps({
+        "event_id": "evt_pay_succ_1",
+        "event_type": "payment.succeeded",
+        "timestamp": "2026-07-19T10:02:00Z",
+        "source": "payment-service",
+        "correlation": {"order_id": "8472", "payment_id": "pay_abc"},
+        "data": {"amount": 1000, "transaction_id": "txn_xyz"},
+    }).encode()
+    msg3.ack = AsyncMock()
+    
+    asyncio.run(consumer.process_event(msg3))
+    msg3.ack.assert_called_once()
+    
+    # Verify all events are stored and can be queried by correlation
+    events = storage.get_events_by_correlation("order_id", "8472")
+    assert len(events) == 3
+    
+    # Verify order: order.created -> payment.initiated -> payment.succeeded
+    assert events[0]["event_type"] == "order.created"
+    assert events[1]["event_type"] == "payment.initiated"
+    assert events[2]["event_type"] == "payment.succeeded"
     
     storage.close()
