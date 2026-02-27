@@ -3,9 +3,9 @@
 Architecture:
     Order Service ──┐
                     │
-    Payment Service ─┼──► NATS
+    Payment Service ─┼──► NATS ──► EventAgent (Passive Observer)
                     │
-                    └──► EventAgent (Passive Observer)
+                    └──► publishes events
 
 EventAgent Flow:
     NATS
@@ -28,7 +28,7 @@ from nats.aio.client import Client as NATSClient
 from rich.console import Console
 
 from .consumer import EventConsumer
-from .models import Event, Correlation, EventType
+from .models import Correlation, Event, EventType
 from .storage import SQLiteEventStore, get_storage
 from .store import create_event_store
 
@@ -50,7 +50,16 @@ async def _run_agent(servers: str, db_path: str | None):
     """
     # Connect to NATS
     nc = NATSClient()
-    await nc.connect(servers=servers.split(","))
+    
+    # Normalize server URLs - add nats:// prefix if missing
+    connection_servers = []
+    for server in servers.split(","):
+        if not server.startswith(("nats://", "tls://", "ws://", "wss://")):
+            connection_servers.append(f"nats://{server}")
+        else:
+            connection_servers.append(server)
+    
+    await nc.connect(servers=connection_servers)
     js = nc.jetstream()
     
     # Initialize SQLite storage
@@ -347,7 +356,7 @@ def events(
         console.print(f"{time_part}  {event['event_type']}")
 
 
-@app.command()
+@app.command("list-events")
 def list_events(
     event_type: str = typer.Option(
         "",
@@ -384,132 +393,214 @@ def list_events(
 
 
 @app.command()
-def demo(
-    payment_result: str = typer.Option(
-        "success",
-        "--payment-result",
-        "-p",
-        help="Payment result to simulate: 'success' or 'failure'",
+def order(
+    order_id: str = typer.Option(
+        "order_8472",
+        "--order-id",
+        "-o",
+        help="Order ID to create",
     ),
-    scenario: str = typer.Option(
-        "",
-        "--scenario",
-        help="Demo scenario to run: 'payment-stuck' for broken workflow demo",
+    amount: float = typer.Option(
+        1000.0,
+        "--amount",
+        "-a",
+        help="Order amount",
     ),
-    servers: str = typer.Option(
-        "localhost:4222",
-        "--servers",
-        "-s",
-        help="NATS server URL(s), comma-separated",
-    ),
-    db_path: str = typer.Option(
-        "",
-        "--db-path",
-        "-d",
-        help="SQLite database path (default: ~/.eventagent/events.db)",
-    )
-) -> None:
-    """Run the EventAgent demo.
-    
-    Flow:
-        1. Payment Service subscriber starts (listens for order.created)
-        2. EventAgent consumer starts (listens for events.>)
-        3. Order Service publishes order.created
-        4. Payment Service receives order.created and publishes payment.initiated
-        5. Payment Service publishes payment.succeeded or payment.failed
-        6. EventAgent stores all events
-    
-    Expected output:
-        [OrderService] Published order.created
-        [PaymentService] Received order.created
-        [PaymentService] Published payment.initiated
-        [PaymentService] Published payment.succeeded
-        [EventAgent] Stored order.created
-        [EventAgent] Stored payment.initiated
-        [EventAgent] Stored payment.succeeded
-    
-    Scenarios:
-        --scenario payment-stuck  Shows a broken workflow where payment fails and retry never occurs
-    """
-    async def run_async():
-        from eventagent.services import run_demo_flow_independent, run_payment_stuck_demo
-        
-        if scenario == "payment-stuck":
-            await run_payment_stuck_demo(
-                nats_servers=servers.split(","),
-                db_path=db_path if db_path else None
-            )
-        else:
-            await run_demo_flow_independent(
-                nats_servers=servers.split(","),
-                payment_result=payment_result,
-                db_path=db_path if db_path else None
-            )
-    
-    try:
-        asyncio.run(run_async())
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Demo interrupted[/yellow]")
-
-
-@app.command("demo-independent")
-def demo_independent(
-    payment_result: str = typer.Option(
-        "success",
-        "--payment-result",
-        "-p",
-        help="Payment result to simulate: 'success' or 'failure'",
+    currency: str = typer.Option(
+        "USD",
+        "--currency",
+        "-c",
+        help="Currency code",
     ),
     servers: str = typer.Option(
         "localhost:4222",
         "--servers",
         "-s",
         help="NATS server URL(s), comma-separated",
-    ),
-    db_path: str = typer.Option(
-        "",
-        "--db-path",
-        "-d",
-        help="SQLite database path (default: ~/.eventagent/events.db)",
     )
 ) -> None:
-    """Run a demo showing INDEPENDENT event flow through NATS.
+    """Create an order by publishing order.created event to NATS.
     
-    This demonstrates that services communicate through events, NOT direct function calls:
-    
-        Order Service ──┐
-                        │
-        Payment Service ─┼──► NATS ──► EventAgent (Passive Observer)
-                        │
-                        └──► publishes order events
-        
-        Then:
-                        │
-                        │
-        Payment Service ─┼──► NATS ──► EventAgent (Passive Observer)
-                        │
-                        └──► publishes payment events
-    
-    Each service has its OWN NATS connection and operates independently.
-    EventAgent passively observes all events without triggering anything.
+    This is the CLI entry point for the Order Service.
+    It publishes an order event that Payment Service can subscribe to.
     
     Example:
-        eventagent demo-independent --payment-result success
-        eventagent demo-independent --payment-result failure
+        eventagent order --order-id order_123 --amount 500.0
     """
     async def run_async():
-        from eventagent.services import run_demo_flow
+        store = await create_event_store(servers.split(","))
         
-        await run_demo_flow(
-            nats_servers=servers.split(","),
-            payment_result=payment_result,
-            db_path=db_path if db_path else None
+        # Create and publish order event
+        event = Event(
+            event_type=EventType.ORDER_CREATED.value,
+            source="order-service",
+            correlation=Correlation(order_id=order_id),
+            data={"amount": amount, "currency": currency},
         )
+        
+        subject = await store.publish(event)
+        console.print(f"[green]Published order.created to {subject}[/green]")
+        console.print(f"[green]Order ID: {order_id}, Amount: {amount} {currency}[/green]")
+        
+        # Close connection
+        await store.nc.close()
+    
+    asyncio.run(run_async())
+
+
+@app.command("payment-service")
+def payment_service(
+    payment_result: str = typer.Option(
+        "success",
+        "--payment-result",
+        "-p",
+        help="Payment result to simulate: 'success' or 'failure'",
+    ),
+    servers: str = typer.Option(
+        "localhost:4222",
+        "--servers",
+        "-s",
+        help="NATS server URL(s), comma-separated",
+    )
+) -> None:
+    """Start the Payment Service that listens for order.created events.
+    
+    This service:
+        1. Subscribes to order.created events
+        2. Publishes payment.initiated events
+        3. Publishes payment.succeeded OR payment.failed events
+    
+    Run this in one terminal, then use 'eventagent order' in another to trigger it.
+    
+    Example:
+        eventagent payment-service --payment-result success
+    """
+    from .services import start_payment_service
     
     try:
-        asyncio.run(run_async())
+        asyncio.run(start_payment_service(servers.split(","), payment_result))
     except KeyboardInterrupt:
-        console.print("\n[yellow]Demo interrupted[/yellow]")
+        console.print("\n[yellow]Payment Service shutting down...[/yellow]")
+
+
+@app.command()
+def workflow(
+    workflow_id: str = typer.Argument(
+        ...,
+        help="Workflow ID (e.g., order_8472)",
+    ),
+    db_path: str = typer.Option(
+        "",
+        "--db-path",
+        "-d",
+        help="SQLite database path (default: ~/.eventagent/events.db)",
+    )
+) -> None:
+    """Show detailed view of a workflow instance.
+    
+    Displays the workflow timeline with all events sorted by timestamp.
+    
+    Example:
+        eventagent workflow order_8472
+    
+    Output:
+        Workflow: order_8472
+        Type: order
+        Status: active
+        
+        Timeline
+        ──────────────────────────────
+        
+        10:00:00  order.created
+                  source: order-service
+        
+        10:00:01  payment.initiated
+                  source: payment-service
+        
+        10:00:02  payment.failed
+                  source: payment-service
+    """
+    storage = get_storage(db_path if db_path else None)
+    
+    # Get workflow summary
+    summary = storage.get_workflow_summary(workflow_id)
+    if summary is None:
+        console.print(f"[red]Workflow not found: {workflow_id}[/red]")
+        raise typer.Exit(1)
+    
+    # Print header
+    console.print(f"[bold cyan]Workflow:[/bold cyan] {summary['workflow_id']}")
+    console.print(f"[bold]Type:[/bold] {summary['workflow_type']}")
+    console.print(f"[bold]Status:[/bold] active")
+    console.print()
+    
+    # Print timeline header
+    console.print("Timeline")
+    console.print("──────────────────────────────")
+    console.print()
+    
+    # Get and display workflow events
+    events_result = storage.get_workflow_events(workflow_id)
+    for event in events_result:
+        # Parse timestamp - extract time part
+        timestamp = event["timestamp"]
+        try:
+            if "T" in timestamp:
+                time_part = timestamp.split("T")[1][:8]
+            else:
+                time_part = timestamp
+        except (IndexError, AttributeError):
+            time_part = timestamp
+        
+        console.print(f"[yellow]{time_part}[/yellow]  {event['event_type']}")
+        console.print(f"          source: {event['source']}")
+        console.print()
+
+
+@app.command("workflows")
+def workflows(
+    limit: int = typer.Option(
+        100,
+        "--limit",
+        "-l",
+        help="Maximum number of workflows to retrieve",
+    ),
+    db_path: str = typer.Option(
+        "",
+        "--db-path",
+        "-d",
+        help="SQLite database path (default: ~/.eventagent/events.db)",
+    )
+) -> None:
+    """List all workflow instances with summary info.
+    
+    Example:
+        eventagent workflows
+    
+    Output:
+        WORKFLOW          LAST EVENT              EVENTS
+        order_8472        payment.failed          3
+        order_9001        payment.succeeded       3
+        order_9010        order.created           1
+    """
+    storage = get_storage(db_path if db_path else None)
+    
+    # Get all workflow summaries
+    summaries = storage.get_all_workflow_summaries(limit=limit)
+    
+    if not summaries:
+        console.print("[yellow]No workflows found[/yellow]")
+        return
+    
+    # Print header
+    console.print(f"[bold]{'WORKFLOW':<20} {'LAST EVENT':<25} {'EVENTS':<8}[/bold]")
+    
+    # Print each workflow
+    for wf in summaries:
+        workflow_id = wf["workflow_id"]
+        last_event = wf["last_event_type"] or "-"
+        event_count = str(wf["event_count"])
+        console.print(f"{workflow_id:<20} {last_event:<25} {event_count:<8}")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,15 @@
+# Development/Testing docker-compose
+# For local development only - uses volume mounts and host networking
+
 services:
   nats:
     image: nats:latest
     container_name: eventagent-nats
-    network_mode: host
     command: ["-js", "-sd", "/data"]
     volumes:
       - nats-data:/data
+    ports:
+      - "4222:4222"
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "4222"]
       interval: 1s
@@ -13,34 +17,35 @@ services:
       retries: 30
 
   eventagent:
-    image: python:3.11-slim
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: eventagent-agent
-    working_dir: /app
-    volumes:
-      - .:/app
-    command: ["python", "-m", "eventagent", "run", "--servers", "localhost:4222"]
+    command: ["run", "--servers", "nats:4222"]
     depends_on:
       nats:
         condition: service_healthy
-    network_mode: host
     environment:
       - PYTHONUNBUFFERED=1
+    volumes:
+      - eventagent-data:/data/.eventagent
+    ports:
+      - "4222:4222"
 
   payment-service:
-    image: python:3.11-slim
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: eventagent-payment-service
-    working_dir: /app
-    volumes:
-      - .:/app
-    command: ["python", "-m", "eventagent.services.payment_service"]
+    command: ["payment-service", "--servers", "nats:4222"]
     depends_on:
       nats:
         condition: service_healthy
-    network_mode: host
     environment:
       - PYTHONUNBUFFERED=1
       - PAYMENT_RESULT=success
-      - NATS_SERVERS=localhost:4222
+      - NATS_SERVERS=nats:4222
 
 volumes:
   nats-data:
+  eventagent-data:

@@ -18,6 +18,7 @@ Order Service responsibilities:
 """
 
 import asyncio
+import os
 
 from ..models import Correlation, Event, EventType
 from ..store import create_event_store
@@ -51,8 +52,8 @@ async def create_order(
 
     try:
         subject = await store.publish(event)
-        print(f"Published order.created event to {subject}")
-        print(f"Event: {event.model_dump_json(indent=2)}")
+        print(f"[OrderService] Published order.created to {subject}")
+        print(f"[OrderService] Event: {event.model_dump_json(indent=2)}")
         return subject
     finally:
         await store.nc.close()
@@ -82,30 +83,75 @@ async def process_order(
     return await create_order(order_id, amount, currency, nats_servers)
 
 
-async def start_order_service(
-    nats_servers: list[str] | None = None,
-    order_id: str = "order_8472",
-    amount: float = 1000.0,
+async def create_order_with_retry(
+    order_id: str,
+    amount: float,
     currency: str = "USD",
-) -> None:
-    """Start the order service and publish an order event.
+    nats_servers: list[str] | None = None,
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+) -> str:
+    """Create an order with automatic retry on failure.
     
-    This is the entry point for running the order service as an independent process.
+    This method attempts to publish the order event and will retry on failure.
+    Useful for offline-first scenarios where initial connection may fail.
     
-    Architecture:
-        Order Service ──┐
-                        │
-        Payment Service ─┼──► NATS
-                        │
-                        └──► publishes order events
+    Args:
+        order_id: Unique identifier for the order
+        amount: Order amount
+        currency: Currency code (default: USD)
+        nats_servers: Optional list of NATS server URLs
+        max_retries: Maximum number of retry attempts
+        retry_delay: Delay between retries in seconds
+    
+    Returns:
+        The NATS subject the event was published to
     """
-    subject = await create_order(order_id, amount, currency, nats_servers)
-    print(f"[green]Order Service completed: published to {subject}[/green]")
+    servers = nats_servers
+    last_error: Exception | None = None
+    
+    for attempt in range(max_retries):
+        try:
+            store = await create_event_store(servers)
+            
+            event = Event(
+                event_type=EventType.ORDER_CREATED.value,
+                source="order-service",
+                correlation=Correlation(order_id=order_id),
+                data={"amount": amount, "currency": currency},
+            )
+            
+            subject = await store.publish(event)
+            print(f"[OrderService] Published order.created (attempt {attempt + 1})")
+            print(f"[OrderService] Event: {event.model_dump_json(indent=2)}")
+            
+            await store.nc.close()
+            return subject
+            
+        except Exception as e:
+            last_error = e
+            print(f"[OrderService] Attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+    
+    raise last_error or Exception("Failed to publish order after all retries")
 
 
 def main() -> None:
-    """Main entry point for the order service."""
-    asyncio.run(start_order_service())
+    """Main entry point for the order service.
+    
+    Environment variables:
+        ORDER_ID: Order ID to create (default: order_8472)
+        ORDER_AMOUNT: Order amount (default: 1000.0)
+        ORDER_CURRENCY: Currency (default: USD)
+        NATS_SERVERS: NATS servers (default: localhost:4222)
+    """
+    order_id = os.environ.get("ORDER_ID", "order_8472")
+    amount = float(os.environ.get("ORDER_AMOUNT", "1000.0"))
+    currency = os.environ.get("ORDER_CURRENCY", "USD")
+    nats_servers = os.environ.get("NATS_SERVERS", "localhost:4222")
+    
+    asyncio.run(create_order(order_id, amount, currency, nats_servers.split(",")))
 
 
 if __name__ == "__main__":

@@ -1,12 +1,14 @@
 """Event consumer for EventAgent - Passive Observer."""
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from nats.aio.client import Client as NATSClient
 from nats.js.api import ConsumerConfig, StreamConfig
 
-from .models import Event
+from .correlation import CorrelationEngine
+from .models import Event, UncorrelatedEvent
 from .storage import SQLiteEventStore
 
 
@@ -22,18 +24,33 @@ class EventConsumer:
           ↓
         Validate Event
           ↓
-        Persist Event to SQLite
+        Persist Raw Event to SQLite
+          ↓
+        Correlation Engine
+          ↓
+        Update Workflow Instance
+          ↓
+        Persist Workflow to SQLite
+          ↓
+        Call handlers (passive observation only)
     
     NOTE: EventAgent is a PASSIVE OBSERVER. It does NOT trigger workflows.
-    It only observes, validates, and persists events. Handlers registered
-    here are for passive purposes only (logging, monitoring, metrics) and
-    should NOT publish new events.
+    It only observes, validates, persists, and correlates events.
+    Handlers registered here are for passive purposes only (logging, monitoring,
+    metrics) and should NOT publish new events.
     """
     
-    def __init__(self, nc: NATSClient, js: Any, storage: SQLiteEventStore | None = None):
+    def __init__(
+        self,
+        nc: NATSClient,
+        js: Any,
+        storage: SQLiteEventStore | None = None,
+        correlation_engine: CorrelationEngine | None = None,
+    ):
         self.nc = nc
         self.js = js
         self.storage = storage
+        self.correlation_engine = correlation_engine or CorrelationEngine()
         self.handlers: dict[str, list[Callable]] = {}
         self._subscription: Any = None
         self._running = False
@@ -61,7 +78,13 @@ class EventConsumer:
               ↓
             validate Pydantic Event
               ↓
-            store in SQLite
+            persist raw Event to SQLite
+              ↓
+            Correlation Engine → update WorkflowInstance
+              ↓
+            persist workflow to SQLite
+              ↓
+            call registered handlers (passive observation only)
         
         NOTE: This is a passive observer. Handlers are called for observation
         purposes only and should not trigger workflows.
@@ -73,9 +96,24 @@ class EventConsumer:
             # Validate Pydantic Event
             event = Event.model_validate_json(data)
             
-            # Persist Event to SQLite
+            # Stamp received_at at observation time (when EventAgent received it)
+            # This is distinct from event.timestamp (when the producer says it happened)
+            # In distributed systems, events may arrive late or out of order,
+            # so tracking both timestamps is essential for timeline reconstruction.
+            event.received_at = datetime.now(timezone.utc)
+            
+            # Run correlation engine to find/update the workflow instance
+            # This happens before persistence so we have the workflow_id
+            result = self.correlation_engine.process_event(event)
+            
+            # Persist event, upsert workflow instance, and link them together
             if self.storage:
-                self.storage.store_event(event)
+                # If uncorrelatable, store it in the uncorrelated_events table
+                # Otherwise, store the event with its workflow instance
+                if isinstance(result, UncorrelatedEvent):
+                    self.storage.store_event_and_correlate(result, None)
+                else:
+                    self.storage.store_event_and_correlate(event, result)
             
             # Call registered handlers for this event type (passive observation only)
             handlers = self.handlers.get(event.event_type, [])
@@ -125,24 +163,10 @@ class EventConsumer:
             # Stream may already exist, ignore
             pass
         
-        # Create a durable consumer for the wildcard
-        try:
-            await self.js.add_consumer(
-                "EVENTS",
-                ConsumerConfig(
-                    name="eventagent-consumer",
-                    filter_subjects=["events.>"],
-                ),
-            )
-        except Exception:
-            # Consumer may already exist, ignore
-            pass
-        
-        # Subscribe to the wildcard subject
+        # Subscribe to the wildcard subject (consumer will be auto-created)
         self._subscription = await self.js.subscribe(
             "events.>",
             cb=self.process_event,
-            durable="eventagent-consumer",
         )
     
     async def stop(self) -> None:

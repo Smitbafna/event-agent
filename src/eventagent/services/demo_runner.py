@@ -10,6 +10,17 @@ from ..models import Correlation, Event, EventType
 from ..store import NATSEventStore
 
 
+def _normalize_servers(servers: list[str]) -> list[str]:
+    """Normalize server URLs to include nats:// prefix if missing."""
+    normalized = []
+    for server in servers:
+        if not server.startswith(("nats://", "tls://", "ws://", "wss://")):
+            normalized.append(f"nats://{server}")
+        else:
+            normalized.append(server)
+    return normalized
+
+
 async def run_demo_flow_independent(nats_servers: list[str], payment_result: str = "success", db_path: str | None = None) -> None:
     """Run a complete demo showing event flow.
     
@@ -34,8 +45,11 @@ async def run_demo_flow_independent(nats_servers: list[str], payment_result: str
     # ============================================================
     print("\n[bold green]═══ Payment Service Subscriber Started ═══[/bold green]")
     
+    # Normalize server URLs
+    servers = _normalize_servers(nats_servers)
+    
     payment_nc = NATSClient()
-    await payment_nc.connect(servers=nats_servers)
+    await payment_nc.connect(servers=servers)
     payment_js = payment_nc.jetstream()
     
     payment_store = NATSEventStore(payment_nc, payment_js)
@@ -107,14 +121,8 @@ async def run_demo_flow_independent(nats_servers: list[str], payment_result: str
     
     # Subscribe to order.created
     order_created_subject = f"events.{EventType.ORDER_CREATED.value}"
-    await payment_js.add_consumer(
-        "EVENTS",
-        ConsumerConfig(
-            name="payment-service-consumer",
-            filter_subjects=[order_created_subject],
-        ),
-    )
-    await payment_js.subscribe(order_created_subject, cb=payment_service_handler, durable="payment-service-consumer")
+    # Subscribe directly - nats will create consumer automatically
+    await payment_js.subscribe(order_created_subject, cb=payment_service_handler)
     
     # ============================================================
     # STEP 2: Set up EventAgent consumer (passive observer)
@@ -123,7 +131,7 @@ async def run_demo_flow_independent(nats_servers: list[str], payment_result: str
     
     # EventAgent has its OWN NATS connection
     agent_nc = NATSClient()
-    await agent_nc.connect(servers=nats_servers)
+    await agent_nc.connect(servers=servers)
     agent_js = agent_nc.jetstream()
     
     agent = EventConsumer(agent_nc, agent_js, storage)
@@ -153,7 +161,7 @@ async def run_demo_flow_independent(nats_servers: list[str], payment_result: str
     print("\n[bold cyan]═══ Order Service Publisher ═══[/bold cyan]")
     
     order_nc = NATSClient()
-    await order_nc.connect(servers=nats_servers)
+    await order_nc.connect(servers=servers)
     order_js = order_nc.jetstream()
     
     order_store = NATSEventStore(order_nc, order_js)
@@ -220,8 +228,11 @@ async def run_payment_stuck_demo(nats_servers: list[str], db_path: str | None = 
     # ============================================================
     print("\n[bold green]═══ Payment Service Subscriber Started ═══[/bold green]")
     
+    # Normalize server URLs
+    servers_normalized = _normalize_servers(nats_servers)
+    
     payment_nc = NATSClient()
-    await payment_nc.connect(servers=nats_servers)
+    await payment_nc.connect(servers=servers_normalized)
     payment_js = payment_nc.jetstream()
     
     payment_store = NATSEventStore(payment_nc, payment_js)
@@ -280,14 +291,8 @@ async def run_payment_stuck_demo(nats_servers: list[str], db_path: str | None = 
     
     # Subscribe to order.created
     order_created_subject = f"events.{EventType.ORDER_CREATED.value}"
-    await payment_js.add_consumer(
-        "EVENTS",
-        ConsumerConfig(
-            name="payment-service-consumer-stuck",
-            filter_subjects=[order_created_subject],
-        ),
-    )
-    await payment_js.subscribe(order_created_subject, cb=payment_service_handler, durable="payment-service-consumer-stuck")
+    # Subscribe directly - nats will create consumer automatically
+    await payment_js.subscribe(order_created_subject, cb=payment_service_handler)
     
     # ============================================================
     # STEP 2: Set up EventAgent consumer (passive observer)
@@ -296,7 +301,7 @@ async def run_payment_stuck_demo(nats_servers: list[str], db_path: str | None = 
     
     # EventAgent has its OWN NATS connection
     agent_nc = NATSClient()
-    await agent_nc.connect(servers=nats_servers)
+    await agent_nc.connect(servers=servers_normalized)
     agent_js = agent_nc.jetstream()
     
     agent = EventConsumer(agent_nc, agent_js, storage)
@@ -327,7 +332,7 @@ async def run_payment_stuck_demo(nats_servers: list[str], db_path: str | None = 
     print("\n[bold cyan]═══ Order Service Publisher ══╗[/bold cyan]")
     
     order_nc = NATSClient()
-    await order_nc.connect(servers=nats_servers)
+    await order_nc.connect(servers=servers_normalized)
     order_js = order_nc.jetstream()
     
     order_store = NATSEventStore(order_nc, order_js)

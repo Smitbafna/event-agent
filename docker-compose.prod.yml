@@ -1,0 +1,57 @@
+# Production docker-compose
+# For production deployment - uses NATS with clustering and persistent volumes
+
+services:
+  nats:
+    image: nats:alpine
+    container_name: eventagent-nats
+    command: ["-js", "-sd", "/data", "-DV"]
+    volumes:
+      - nats-data:/data
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "4222"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  eventagent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eventagent-agent
+    command: ["run", "--servers", "nats:4222", "--db-path", "/data/events.db"]
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - eventagent-data:/data
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["uvicorn", "eventagent.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    container_name: eventagent-api
+    ports:
+      - "8000:8000"
+    depends_on:
+      eventagent:
+        condition: service_started
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NATS_SERVERS=nats:4222
+      - EVENTAGENT_DB_PATH=/data/events.db
+    volumes:
+      - eventagent-data:/data
+    restart: unless-stopped
+
+volumes:
+  nats-data:
+  eventagent-data:

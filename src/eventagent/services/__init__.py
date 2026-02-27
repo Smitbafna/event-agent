@@ -1,6 +1,6 @@
 """Services package for EventAgent.
 
-ARCHITECTURE: Services are EVENT PUBLISHERS, not consumers of EventAgent.
+ARCHITECTURE: Services are EVENT PUBLISHERS and CONSUMERS, not consumers of EventAgent.
 
     Order Service ──┐
                     │
@@ -12,7 +12,7 @@ Then:
 
     Payment Service ──┐
                       │
-    Payment Processor ─┼──► NATS ──► EventAgent (Passive Observer)
+                      ├──► NATS ──► EventAgent (Passive Observer)
                       │
                       └──► publishes payment events
 
@@ -33,27 +33,22 @@ EVENT INDEPENDENCE PRINCIPLE:
     Each service has its OWN NATS connection and operates independently.
 """
 
-from .demo_runner import run_demo_flow, run_demo_flow_independent, run_payment_stuck_demo
-from .order_service import create_order, process_order
+from .order_service import (
+    create_order,
+    create_order_with_retry,
+    process_order,
+)
 from .payment_service import (
     handle_order_created,
-    handle_payment_initiated,
-    init_payment,
-    init_payment_processor,
-    start_payment_processor_service,
     start_payment_service,
 )
 
 __all__ = [
-    "run_demo_flow",
-    "run_demo_flow_independent",
-    "run_payment_stuck_demo",
+    # Order service
     "create_order",
+    "create_order_with_retry",
     "process_order",
+    # Payment service
     "handle_order_created",
-    "handle_payment_initiated",
-    "init_payment",
-    "init_payment_processor",
-    "start_payment_processor_service",
     "start_payment_service",
 ]

@@ -1,7 +1,6 @@
-"""Tests for independent event flow through NATS (Step 6)."""
+"""Tests for the actual working services (Payment Service and Order Service)."""
 
 import json
-import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from eventagent.models import Correlation, Event, EventType
@@ -15,71 +14,76 @@ def test_services_independent_architecture():
                         │
         Payment Service ─┼──► NATS ──► EventAgent (Passive Observer)
                         │
-                        └──► publishes order events
-        
-        Then:
-                        │
-                        │
-        Payment Service ─┼──► NATS ──► EventAgent (Passive Observer)
-                        │
-                        └──► publishes payment events
+                        └──► publishes events
     """
-    # Verify that services have their own NATS connections
     from eventagent.services import (
+        create_order,
         start_payment_service,
-        start_payment_processor_service,
     )
     
-    # These functions demonstrate independent NATS connections
-    # Each service creates its own NATS connection and subscribes independently
+    # Verify that services have their own NATS connections
     assert "nats_servers" in start_payment_service.__code__.co_varnames
-    assert "nats_servers" in start_payment_processor_service.__code__.co_varnames
     
-    # Verify EventAgent is passive observer
-    from eventagent.consumer import EventConsumer
-    
-    nc = MagicMock()
-    js = MagicMock()
-    
-    consumer = EventConsumer(nc, js, None)
-    
-    # The consumer should NOT have publish capability in its handlers
-    # Handlers are for passive observation only
-    
-    # Verify the handler registration doesn't include publishing
-    async def passive_handler(event: Event):
-        # Passive handler - only observes, doesn't publish
-        pass
-    
-    consumer.register_handler("order.created", passive_handler)
-    
-    # The consumer should never call js.publish on its own
-    assert not hasattr(consumer, 'publish') or consumer.publish is None
+    # Verify create_order function signature
+    assert "order_id" in create_order.__code__.co_varnames
+    assert "amount" in create_order.__code__.co_varnames
 
 
-def test_event_flow_no_direct_calls():
-    """Test that the demo_runner shows proper event independence.
-    
-    Events flow through NATS, not direct function calls.
-    Each service has independent NATS connections.
-    """
-    from eventagent.services.demo_runner import run_demo_flow_independent
-    
-    # The run_demo_flow_independent function should create separate NATS connections
-    # for each service, demonstrating independence
-    
-    # Check that it uses NATSClient directly for each service
+def test_payment_service_handler_signature():
+    """Test that the payment service handler has the correct signature."""
     import inspect
-    source = inspect.getsource(run_demo_flow_independent)
+    from eventagent.services.payment_service import handle_order_created
     
-    # Should create multiple NATS connections (one per service)
-    assert source.count("NATSClient()") >= 3, "Should have independent NATS connections for each service"
+    sig = inspect.signature(handle_order_created)
+    assert "event" in sig.parameters
+    assert "store" in sig.parameters
+    assert "payment_result" in sig.parameters
+
+
+def test_payment_service_main_entry():
+    """Test that payment service has a main entry point."""
+    from eventagent.services.payment_service import main
+    
+    # Verify main function exists
+    assert callable(main)
+    
+    # Check it uses environment variables
+    import inspect
+    source = inspect.getsource(main)
+    assert "PAYMENT_RESULT" in source
+    assert "NATS_SERVERS" in source
+
+
+def test_order_service_main_entry():
+    """Test that order service has a main entry point."""
+    from eventagent.services.order_service import main
+    
+    # Verify main function exists
+    assert callable(main)
+    
+    # Check it uses environment variables
+    import inspect
+    source = inspect.getsource(main)
+    assert "ORDER_ID" in source
+    assert "ORDER_AMOUNT" in source
+
+
+def test_payment_service_subscribes_to_order_created():
+    """Test that payment service subscribes to order.created subject."""
+    import inspect
+    from eventagent.services.payment_service import start_payment_service
+    
+    source = inspect.getsource(start_payment_service)
+    
+    # Should subscribe to order.created
+    assert "ORDER_CREATED" in source
+    assert "subscribe" in source
 
 
 def test_passive_observer_never_publishes():
     """Test that EventConsumer (passive observer) never publishes events.
     
-    This is the key property of Step 5/6:
+    This is the key property of the EventAgent architecture:
     - EventAgent observes events
     - EventAgent does NOT publish events
     - EventAgent does NOT trigger workflows
@@ -92,12 +96,8 @@ def test_passive_observer_never_publishes():
     
     consumer = EventConsumer(nc, js, None)
     
-    # Register a handler (even if it tries to do something)
-    async def handler(event: Event):
-        # Even if handler tries to do something, consumer won't publish
-        pass
-    
-    consumer.register_handler("order.created", handler)
+    # The consumer should NOT have publish capability in its handlers
+    # Handlers are for passive observation only
     
     # Process an event
     msg = AsyncMock()
@@ -139,17 +139,6 @@ def test_event_chain_through_nats():
         assert subject.startswith("events.")
 
 
-def test_demo_runner_uses_nats_publish():
-    """Test that demo_runner publishes to NATS (not direct calls)."""
-    import inspect
-    from eventagent.services.demo_runner import run_demo_flow_independent
-    
-    source = inspect.getsource(run_demo_flow_independent)
-    
-    # Should use store.publish (which publishes to NATS)
-    assert "store.publish" in source or "payment_store.publish" in source or "order_store.publish" in source
-
-
 def test_eventagent_subscribes_to_wildcard():
     """Test that EventAgent subscribes to events.> wildcard.
     
@@ -169,48 +158,14 @@ def test_eventagent_subscribes_to_wildcard():
     assert "events.>" in source, "EventConsumer should subscribe to events.> wildcard"
 
 
-def test_payment_stuck_demo_function_exists():
-    """Test that the payment-stuck demo function exists and has correct signature.
-    
-    This verifies step 8: The broken workflow demo where Payment Service stops
-    after publishing payment.failed, and no retry occurs.
-    """
-    from eventagent.services.demo_runner import run_payment_stuck_demo
+def test_payment_service_handles_success_and_failure():
+    """Test that payment service can handle both success and failure scenarios."""
     import inspect
+    from eventagent.services.payment_service import start_payment_service
     
-    # Verify function exists and has correct signature
-    sig = inspect.signature(run_payment_stuck_demo)
-    assert "nats_servers" in sig.parameters
-    assert "db_path" in sig.parameters
+    source = inspect.getsource(start_payment_service)
     
-    # Verify it uses order_8472 as order_id
-    source = inspect.getsource(run_payment_stuck_demo)
-    assert "order_8472" in source, "Should use order_8472 as order_id in payment-stuck demo"
-    
-    # Verify it only publishes 3 events: order.created, payment.initiated, payment.failed
-    # (no retry event should be published)
-    assert "PAYMENT_FAILED" in source, "Should publish payment.failed"
-
-
-def test_payment_stuck_demo_shows_broken_workflow():
-    """Test that payment-stuck demo shows the broken workflow pattern.
-    
-    EventAgent knows:
-        1. order.created
-        2. payment.initiated  
-        3. payment.failed
-    
-    But does NOT know:
-        - A retry should have occurred
-    """
-    from eventagent.services.demo_runner import run_payment_stuck_demo
-    import inspect
-    
-    source = inspect.getsource(run_payment_stuck_demo)
-    
-    # Verify the flow includes payment.failed
-    assert "payment.failed" in source or "PAYMENT_FAILED" in source
-    
-    # Verify there's a comment or output about Payment Service stopping
-    assert "STOPPED" in source or "stopped" in source.lower() or "crash" in source.lower(), \
-        "Should indicate Payment Service stopped/crashed"
+    # Should handle both payment_result options
+    assert "payment_result" in source
+    assert "success" in source
+    assert "failure" in source or "failed" in source

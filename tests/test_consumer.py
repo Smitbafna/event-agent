@@ -62,6 +62,196 @@ def test_passive_observer_does_not_publish():
     storage.close()
 
 
+def test_correlation_flow_event_through_consumer():
+    """Test the full correlation flow through the consumer:
+    
+    Event
+      ↓
+    Correlation Engine → WorkflowInstance
+      ↓
+    SQLite: events (persist raw)
+      ↓
+    SQLite: workflow_instances (upsert)
+      ↓
+    SQLite: workflow_events (link)
+    """
+    nc = MagicMock()
+    js = MagicMock()
+    storage = SQLiteEventStore(tempfile.mktemp(suffix=".db"))
+    
+    consumer = EventConsumer(nc, js, storage)
+    
+    # Process 3 events for order_id=8472
+    events_data = [
+        {
+            "event_id": "evt_order_8472_1",
+            "event_type": "order.created",
+            "timestamp": "2026-07-19T10:00:00Z",
+            "source": "order-service",
+            "correlation": {"order_id": "8472"},
+            "data": {"amount": 1000},
+        },
+        {
+            "event_id": "evt_order_8472_2",
+            "event_type": "payment.initiated",
+            "timestamp": "2026-07-19T10:01:00Z",
+            "source": "payment-service",
+            "correlation": {"order_id": "8472", "payment_id": "pay_123"},
+            "data": {"amount": 1000},
+        },
+        {
+            "event_id": "evt_order_8472_3",
+            "event_type": "payment.succeeded",
+            "timestamp": "2026-07-19T10:02:00Z",
+            "source": "payment-service",
+            "correlation": {"order_id": "8472", "payment_id": "pay_123"},
+            "data": {"amount": 1000, "transaction_id": "txn_abc"},
+        },
+    ]
+    
+    for event_data in events_data:
+        msg = AsyncMock()
+        msg.data = json.dumps(event_data).encode()
+        msg.ack = AsyncMock()
+        asyncio.run(consumer.process_event(msg))
+        msg.ack.assert_called_once()
+    
+    # Verify workflow_instance was created in SQLite
+    workflow = storage.get_workflow_by_correlation("order_id", "8472")
+    assert workflow is not None
+    assert workflow["workflow_id"] == "order_8472"
+    assert workflow["workflow_type"] == "order"
+    assert workflow["correlation_value"] == "8472"
+    assert workflow["first_seen"] == "2026-07-19T10:00:00+00:00"
+    assert workflow["last_seen"] == "2026-07-19T10:02:00+00:00"
+    
+    # Also verify by workflow_id
+    workflow_by_id = storage.get_workflow_instance("order_8472")
+    assert workflow_by_id is not None
+    assert workflow_by_id["workflow_id"] == "order_8472"
+    
+    # Verify events are linked to the workflow
+    workflow_events = storage.get_workflow_events("order_8472")
+    assert len(workflow_events) == 3
+    assert workflow_events[0]["event_type"] == "order.created"
+    assert workflow_events[1]["event_type"] == "payment.initiated"
+    assert workflow_events[2]["event_type"] == "payment.succeeded"
+    
+    # Verify we can get all workflow instances
+    all_workflows = storage.get_all_workflow_instances()
+    assert len(all_workflows) == 1
+    assert all_workflows[0]["workflow_id"] == "order_8472"
+    
+    storage.close()
+
+
+def test_correlation_flow_multiple_workflows():
+    """Test that different correlation values create separate workflow instances.
+    
+    This validates:
+    
+    Event(order_id=8472) → Workflow 8472
+    Event(order_id=9001) → Workflow 9001
+    
+    Never mix.
+    """
+    nc = MagicMock()
+    js = MagicMock()
+    storage = SQLiteEventStore(tempfile.mktemp(suffix=".db"))
+    
+    consumer = EventConsumer(nc, js, storage)
+    
+    # Process events for two different order_ids
+    event1_8472 = {
+        "event_id": "evt_8472_1",
+        "event_type": "order.created",
+        "timestamp": "2026-07-19T10:00:00Z",
+        "source": "order-service",
+        "correlation": {"order_id": "8472"},
+        "data": {"amount": 1000},
+    }
+    event2_8472 = {
+        "event_id": "evt_8472_2",
+        "event_type": "payment.initiated",
+        "timestamp": "2026-07-19T10:01:00Z",
+        "source": "payment-service",
+        "correlation": {"order_id": "8472"},
+        "data": {"amount": 1000},
+    }
+    event_9001 = {
+        "event_id": "evt_9001_1",
+        "event_type": "order.created",
+        "timestamp": "2026-07-19T10:05:00Z",
+        "source": "order-service",
+        "correlation": {"order_id": "9001"},
+        "data": {"amount": 250},
+    }
+    
+    for event_data in [event1_8472, event2_8472, event_9001]:
+        msg = AsyncMock()
+        msg.data = json.dumps(event_data).encode()
+        msg.ack = AsyncMock()
+        asyncio.run(consumer.process_event(msg))
+    
+    # Verify two separate workflow instances
+    all_workflows = storage.get_all_workflow_instances()
+    assert len(all_workflows) == 2
+    
+    workflow_8472 = storage.get_workflow_by_correlation("order_id", "8472")
+    workflow_9001 = storage.get_workflow_by_correlation("order_id", "9001")
+    
+    assert workflow_8472 is not None
+    assert workflow_9001 is not None
+    assert workflow_8472["workflow_id"] != workflow_9001["workflow_id"]
+    
+    # Verify correct event counts per workflow
+    events_8472 = storage.get_workflow_events(workflow_8472["workflow_id"])
+    events_9001 = storage.get_workflow_events(workflow_9001["workflow_id"])
+    
+    assert len(events_8472) == 2
+    assert len(events_9001) == 1
+    
+    storage.close()
+
+
+def test_correlation_flow_consumer_with_correlation_engine():
+    """Test that EventConsumer can be created with a pre-configured CorrelationEngine."""
+    nc = MagicMock()
+    js = MagicMock()
+    storage = SQLiteEventStore(tempfile.mktemp(suffix=".db"))
+    
+    from eventagent.correlation import CorrelationEngine
+    
+    engine = CorrelationEngine(max_workflows=100)
+    consumer = EventConsumer(nc, js, storage, correlation_engine=engine)
+    
+    assert consumer.correlation_engine is engine
+    assert consumer.correlation_engine.max_workflows == 100
+    
+    # Process an event and verify it goes through the custom engine
+    msg = AsyncMock()
+    msg.data = json.dumps({
+        "event_id": "evt_custom_engine",
+        "event_type": "order.created",
+        "timestamp": "2026-07-19T10:00:00Z",
+        "source": "order-service",
+        "correlation": {"order_id": "custom_test"},
+        "data": {},
+    }).encode()
+    msg.ack = AsyncMock()
+    
+    asyncio.run(consumer.process_event(msg))
+    msg.ack.assert_called_once()
+    
+    # Verify workflow was created via the engine
+    assert consumer.correlation_engine.count == 1
+    instance = consumer.correlation_engine.get_workflow("order_id", "custom_test")
+    assert instance is not None
+    assert len(instance.events) == 1
+    
+    storage.close()
+
+
 def test_passive_observer_flow():
     """Test that EventAgent follows the passive observer flow:
     
@@ -90,7 +280,7 @@ def test_passive_observer_flow():
     for event_type in [EventType.ORDER_CREATED.value, EventType.PAYMENT_INITIATED.value, EventType.PAYMENT_SUCCEEDED.value]:
         consumer.register_handler(event_type, observe_handler)
     
-    # Simulate receiving events
+    # Simulate receiving events (with correlation data for the correlation engine)
     for event_type in ["order.created", "payment.initiated", "payment.succeeded"]:
         msg = AsyncMock()
         msg.data = json.dumps({
@@ -98,7 +288,7 @@ def test_passive_observer_flow():
             "event_type": event_type,
             "timestamp": "2026-07-19T10:00:00Z",
             "source": "test-service",
-            "correlation": {},
+            "correlation": {"order_id": "flow_test"},
             "data": {},
         }).encode()
         msg.ack = AsyncMock()
@@ -207,14 +397,14 @@ def test_process_event_with_handlers():
     
     consumer.register_handler("order.created", handler)
     
-    # Create a mock message
+    # Create a mock message (with correlation data for the correlation engine)
     msg = AsyncMock()
     msg.data = json.dumps({
         "event_id": "evt_test456",
         "event_type": "order.created",
         "timestamp": "2026-07-19T10:00:00Z",
         "source": "order-service",
-        "correlation": {},
+        "correlation": {"order_id": "8472"},
         "data": {"amount": 500},
     }).encode()
     msg.ack = AsyncMock()
@@ -275,14 +465,14 @@ def test_consumer_without_storage():
     js = MagicMock()
     consumer = EventConsumer(nc, js, None)
     
-    # Create a mock message
+    # Create a mock message (with correlation data for the correlation engine)
     msg = AsyncMock()
     msg.data = json.dumps({
         "event_id": "evt_test789",
         "event_type": "order.cancelled",
         "timestamp": "2026-07-19T10:00:00Z",
         "source": "order-service",
-        "correlation": {},
+        "correlation": {"order_id": "8472"},
         "data": {},
     }).encode()
     msg.ack = AsyncMock()
@@ -382,9 +572,43 @@ def test_store_event_extracts_correlation():
     events = storage.get_events(limit=10)
     assert len(events) == 1
     
-    # The first key in correlation should be extracted
-    assert events[0]["correlation_key"] in ["order_id", "customer_id"]
-    assert events[0]["correlation_value"] is not None
+    # The configured primary key (order_id) should be extracted as the indexed key
+    assert events[0]["correlation_key"] == "order_id"
+    assert events[0]["correlation_value"] == "8472"
+    
+    storage.close()
+
+
+def test_store_event_extracts_all_correlation_data():
+    """Test that store_event extracts ALL correlation fields (Step 2).
+    
+    Given an event with correlation: {order_id: "8472", payment_id: "pay_123"},
+    the store should extract BOTH fields into correlation_data JSON,
+    while using order_id as the primary indexed key.
+    """
+    storage = SQLiteEventStore(tempfile.mktemp(suffix=".db"))
+    
+    # Simulate a payment.failed event with multiple correlation fields
+    event = Event(
+        event_type=EventType.PAYMENT_FAILED.value,
+        source="payment-service",
+        correlation=Correlation(order_id="8472", payment_id="pay_123"),
+        data={"error_code": "insufficient_funds", "error_message": "Payment declined"},
+    )
+    
+    storage.store_event(event)
+    
+    events = storage.get_events(limit=10)
+    assert len(events) == 1
+    
+    # Primary key should be order_id (configured key)
+    assert events[0]["correlation_key"] == "order_id"
+    assert events[0]["correlation_value"] == "8472"
+    
+    # ALL correlation data should be stored in correlation_data
+    import json
+    correlation_data = json.loads(events[0]["correlation_data"])
+    assert correlation_data == {"order_id": "8472", "payment_id": "pay_123"}
     
     storage.close()
 

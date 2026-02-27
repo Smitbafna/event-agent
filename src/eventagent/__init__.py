@@ -2,7 +2,9 @@
 
 __version__ = "0.1.0"
 
+from .config import Config, CorrelationConfig, default_config
 from .consumer import EventConsumer
+from .correlation import CorrelationEngine
 from .models import (
     Correlation,
     Event,
@@ -12,6 +14,8 @@ from .models import (
     PaymentInitiatedEvent,
     PaymentRetryScheduledEvent,
     PaymentSucceededEvent,
+    UncorrelatedEvent,
+    WorkflowInstance,
 )
 from .storage import SQLiteEventStore, get_storage
 
@@ -24,7 +28,13 @@ __all__ = [
     "PaymentSucceededEvent",
     "PaymentFailedEvent",
     "PaymentRetryScheduledEvent",
+    "UncorrelatedEvent",
+    "WorkflowInstance",
     "EventConsumer",
+    "CorrelationEngine",
     "SQLiteEventStore",
     "get_storage",
+    "Config",
+    "CorrelationConfig",
+    "default_config",
 ]

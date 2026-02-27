@@ -18,6 +18,7 @@ Payment Service responsibilities:
 """
 
 import asyncio
+import os
 from typing import Any
 from uuid import uuid4
 
@@ -25,19 +26,40 @@ from nats.aio.client import Client as NATSClient
 from nats.js.api import ConsumerConfig, StreamConfig
 
 from ..models import Correlation, Event, EventType
+from ..store import NATSEventStore
 
 
-async def handle_order_created(event: Event, store) -> None:
-    """Handle order.created event and publish payment.initiated.
+def _normalize_servers(servers: list[str] | None) -> list[str]:
+    """Normalize server URLs to include nats:// prefix if missing."""
+    if servers is None:
+        return ["nats://localhost:4222"]
+    normalized = []
+    for server in servers:
+        if not server.startswith(("nats://", "tls://", "ws://", "wss://")):
+            normalized.append(f"nats://{server}")
+        else:
+            normalized.append(server)
+    return normalized
+
+
+async def handle_order_created(event: Event, store: NATSEventStore, payment_result: str = "success") -> None:
+    """Handle order.created event and trigger payment processing.
     
-    This handler receives order.created events and triggers payment processing
-    by publishing a payment.initiated event.
+    Flow:
+        order.created
+              ↓
+        payment.initiated
+              ↓
+        payment.succeeded (if payment_result == "success")
+        OR
+        payment.failed (if payment_result == "failure")
     
     The correlation (order_id) is preserved from the incoming event to the outgoing event.
     
     Args:
         event: The order.created event received from NATS
-        store: The event store for publishing the response event
+        store: The event store for publishing the response events
+        payment_result: Either "success" or "failure" to simulate the payment outcome
     """
     # Extract order_id from correlation to preserve it
     order_id = None
@@ -47,7 +69,7 @@ async def handle_order_created(event: Event, store) -> None:
         order_id = event.correlation["order_id"]
     
     if not order_id:
-        print(f"[red]Warning: order.created event missing order_id in correlation[/red]")
+        print("[red]Warning: order.created event missing order_id in correlation[/red]")
         return
     
     # Generate a payment_id
@@ -56,11 +78,11 @@ async def handle_order_created(event: Event, store) -> None:
     # Extract amount from event data
     amount = event.data.get("amount", 0.0)
     
-    # Create payment.initiated event with preserved correlation
+    # Publish payment.initiated event with preserved correlation
     payment_event = Event(
         event_type=EventType.PAYMENT_INITIATED.value,
         source="payment-service",
-        correlation=Correlation(order_id=order_id),
+        correlation=Correlation(order_id=order_id, payment_id=payment_id),
         data={
             "payment_id": payment_id,
             "amount": amount,
@@ -68,47 +90,11 @@ async def handle_order_created(event: Event, store) -> None:
     )
     
     subject = await store.publish(payment_event)
-    print(f"Published payment.initiated event to {subject}")
-    print(f"Event: {payment_event.model_dump_json(indent=2)}")
-
-
-async def handle_payment_initiated(event: Event, store: Any, payment_result: str = "success") -> None:
-    """Handle payment.initiated event and publish payment.succeeded or payment.failed.
+    print(f"[PaymentService] Published payment.initiated to {subject}")
+    print(f"[PaymentService] Event: {payment_event.model_dump_json(indent=2)}")
     
-    This handler receives payment.initiated events and simulates a payment result.
-    
-    Flow:
-        payment.initiated
-              ↓
-        payment.succeeded (if payment_result == "success")
-        OR
-        payment.failed (if payment_result == "failure")
-    
-    Args:
-        event: The payment.initiated event received from NATS
-        store: The event store for publishing the response event
-        payment_result: Either "success" or "failure" to simulate the payment outcome
-    """
-    # Extract data from the payment.initiated event
-    order_id = None
-    payment_id = None
-    amount = 0.0
-    
-    if isinstance(event.correlation, Correlation):
-        order_id = event.correlation.order_id
-    elif isinstance(event.correlation, dict) and "order_id" in event.correlation:
-        order_id = event.correlation["order_id"]
-    
-    if isinstance(event.correlation, Correlation) and event.correlation.payment_id:
-        payment_id = event.correlation.payment_id
-    elif isinstance(event.correlation, dict) and "payment_id" in event.correlation:
-        payment_id = event.correlation["payment_id"]
-    
-    payment_id = payment_id or event.data.get("payment_id", f"payment_{uuid4().hex[:8]}")
-    amount = event.data.get("amount", 0.0)
-    
+    # Immediately process payment and publish result
     if payment_result == "success":
-        # Publish payment.succeeded event
         transaction_id = f"txn_{uuid4().hex[:8]}"
         
         result_event = Event(
@@ -124,11 +110,10 @@ async def handle_payment_initiated(event: Event, store: Any, payment_result: str
         )
         
         subject = await store.publish(result_event)
-        print(f"[green]Published payment.succeeded event to {subject}[/green]")
-        print(f"Event: {result_event.model_dump_json(indent=2)}")
+        print(f"[PaymentService] Published payment.succeeded to {subject}")
+        print(f"[PaymentService] Event: {result_event.model_dump_json(indent=2)}")
     
     else:
-        # Publish payment.failed event
         result_event = Event(
             event_type=EventType.PAYMENT_FAILED.value,
             source="payment-service",
@@ -142,12 +127,20 @@ async def handle_payment_initiated(event: Event, store: Any, payment_result: str
         )
         
         subject = await store.publish(result_event)
-        print(f"[red]Published payment.failed event to {subject}[/red]")
-        print(f"Event: {result_event.model_dump_json(indent=2)}")
+        print(f"[PaymentService] Published payment.failed to {subject}")
+        print(f"[PaymentService] Event: {result_event.model_dump_json(indent=2)}")
 
 
-async def start_payment_service(nats_servers: list[str] | None = None) -> None:
+async def start_payment_service(
+    nats_servers: list[str] | None = None,
+    payment_result: str = "success",
+) -> None:
     """Start the payment service and subscribe to order.created events.
+    
+    This is a COMPLETE payment service that:
+        1. Subscribes to order.created events
+        2. Publishes payment.initiated events
+        3. Publishes payment.succeeded OR payment.failed events
     
     Flow:
         events.order.created
@@ -155,14 +148,20 @@ async def start_payment_service(nats_servers: list[str] | None = None) -> None:
         Payment Service receives it
               ↓
         payment.initiated
+              ↓
+        payment.succeeded OR payment.failed (based on payment_result flag)
     
     The correlation (order_id) is preserved across the event chain.
+    
+    Args:
+        nats_servers: Optional list of NATS server URLs
+        payment_result: Either "success" or "failure" to simulate the payment outcome
     """
     nc = NATSClient()
-    js = nc.jetstream()
     
-    connection_servers = nats_servers or ["nats://localhost:4222"]
-    await nc.connect(servers=connection_servers)
+    servers = _normalize_servers(nats_servers)
+    await nc.connect(servers=servers)
+    js = nc.jetstream()
     
     try:
         # Ensure the events stream exists
@@ -177,9 +176,9 @@ async def start_payment_service(nats_servers: list[str] | None = None) -> None:
             # Stream may already exist, ignore
             pass
         
-        # Create a mock store for publishing
-        from ..store import NATSEventStore
+        # Create store for publishing
         store = NATSEventStore(nc, js)
+        await store.initialize()
         
         # Subscribe to order.created events
         subject = f"events.{EventType.ORDER_CREATED.value}"
@@ -193,162 +192,46 @@ async def start_payment_service(nats_servers: list[str] | None = None) -> None:
                 # Validate Pydantic Event
                 event = Event.model_validate_json(data)
                 
-                # Handle the event
-                await handle_order_created(event, store)
+                print(f"[PaymentService] Received {event.event_type}")
+                
+                # Handle the event and process payment
+                await handle_order_created(event, store, payment_result)
                 
                 # Ack the message
                 await msg.ack()
             except Exception as e:
-                print(f"[red]Error processing event: {e}[/red]")
+                print(f"[PaymentService] Error processing event: {e}")
                 try:
                     await msg.nak()
                 except Exception:
                     pass
         
-        # Create or update consumer
-        await js.add_consumer(
-            "EVENTS",
-            ConsumerConfig(
-                name="eventagent-payment-service",
-                filter_subjects=[subject],
-            ),
-        )
-        
-        # Subscribe to the subject
-        await js.subscribe(
-            subject,
-            cb=message_handler,
-            durable="eventagent-payment-service",
-        )
-        
-        print(f"[green]Payment Service started, listening for order.created events...[/green]")
-        
-        # Keep the service running
-        while True:
-            await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        print("[yellow]Payment Service shutting down...[/yellow]")
-    finally:
-        await nc.close()
-
-
-async def start_payment_processor_service(nats_servers: list[str] | None = None, payment_result: str = "success") -> None:
-    """Start the payment processor service that handles payment.initiated events.
-    
-    Flow:
-        events.payment.initiated
-              ↓
-        Payment Processor receives it
-              ↓
-        payment.succeeded OR payment.failed (based on payment_result flag)
-    
-    Args:
-        nats_servers: Optional list of NATS server URLs
-        payment_result: Either "success" or "failure" to simulate the payment outcome
-    """
-    nc = NATSClient()
-    js = nc.jetstream()
-    
-    connection_servers = nats_servers or ["nats://localhost:4222"]
-    await nc.connect(servers=connection_servers)
-    
-    try:
-        # Ensure the events stream exists
-        try:
-            await js.add_stream(
-                StreamConfig(
-                    name="EVENTS",
-                    subjects=["events.>"],
-                )
-            )
-        except Exception:
-            # Stream may already exist, ignore
-            pass
-        
-        # Create a mock store for publishing
-        from ..store import NATSEventStore
-        store = NATSEventStore(nc, js)
-        
-        # Subscribe to payment.initiated events
-        subject = f"events.{EventType.PAYMENT_INITIATED.value}"
-        
-        async def message_handler(msg):
-            """Process incoming payment.initiated message."""
-            try:
-                # Decode JSON from NATS message
-                data = msg.data.decode()
-                
-                # Validate Pydantic Event
-                event = Event.model_validate_json(data)
-                
-                # Handle the event and simulate payment result
-                await handle_payment_initiated(event, store, payment_result)
-                
-                # Ack the message
-                await msg.ack()
-            except Exception as e:
-                print(f"[red]Error processing event: {e}[/red]")
-                try:
-                    await msg.nak()
-                except Exception:
-                    pass
-        
-        # Create or update consumer
-        await js.add_consumer(
-            "EVENTS",
-            ConsumerConfig(
-                name="eventagent-payment-processor",
-                filter_subjects=[subject],
-            ),
-        )
-        
-        # Subscribe to the subject
-        await js.subscribe(
-            subject,
-            cb=message_handler,
-            durable="eventagent-payment-processor",
-        )
+        # Subscribe directly - NATS will create consumer automatically
+        await js.subscribe(subject, cb=message_handler)
         
         result_text = "succeeded" if payment_result == "success" else "failed"
-        print(f"[green]Payment Processor Service started, will publish payment.{result_text} events...[/green]")
+        print(f"[PaymentService] Started, listening for order.created events...")
+        print(f"[PaymentService] Will publish payment.{result_text} events automatically")
         
         # Keep the service running
         while True:
             await asyncio.sleep(1)
+            
     except asyncio.CancelledError:
-        print("[yellow]Payment Processor Service shutting down...[/yellow]")
+        print("[PaymentService] Shutting down...")
     finally:
         await nc.close()
-
-
-async def init_payment(nats_servers: list[str] | None = None) -> None:
-    """Initialize payment processing by subscribing to order events.
-    
-    This is the main entry point for the payment service.
-    It subscribes to events.order.created and triggers payment.initiated events.
-    
-    Args:
-        nats_servers: Optional list of NATS server URLs
-    """
-    await start_payment_service(nats_servers)
-
-
-async def init_payment_processor(nats_servers: list[str] | None = None, payment_result: str = "success") -> None:
-    """Initialize payment processing by handling payment.initiated events.
-    
-    This is the main entry point for the payment processor service.
-    It subscribes to events.payment.initiated and publishes payment.succeeded/failed events.
-    
-    Args:
-        nats_servers: Optional list of NATS server URLs
-        payment_result: Either "success" or "failure" to simulate the payment outcome
-    """
-    await start_payment_processor_service(nats_servers, payment_result)
 
 
 def main() -> None:
     """Main entry point for the payment service."""
-    asyncio.run(start_payment_service())
+    payment_result = os.environ.get("PAYMENT_RESULT", "success")
+    nats_servers = os.environ.get("NATS_SERVERS", "localhost:4222")
+    
+    asyncio.run(start_payment_service(
+        nats_servers=nats_servers.split(","),
+        payment_result=payment_result,
+    ))
 
 
 if __name__ == "__main__":

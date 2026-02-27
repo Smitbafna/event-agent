@@ -77,7 +77,17 @@ async def create_event_store(servers: list[str] | None = None) -> NATSEventStore
     nc = NATSClient()
     js = nc.jetstream()
     
-    connection_servers = servers or ["nats://localhost:4222"]
+    # Normalize server URLs - add nats:// prefix if missing
+    default_servers = ["nats://localhost:4222"]
+    if servers:
+        connection_servers = []
+        for server in servers:
+            if not server.startswith(("nats://", "tls://", "ws://", "wss://")):
+                connection_servers.append(f"nats://{server}")
+            else:
+                connection_servers.append(server)
+    else:
+        connection_servers = default_servers
     await nc.connect(servers=connection_servers)
     
     store = NATSEventStore(nc, js)
